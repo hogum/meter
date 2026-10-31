@@ -1,0 +1,1758 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>用电监测系统</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230e1626'/%3E%3Cpath d='M18 5 9 18h5l-1 9 9-13h-5z' fill='%2338bdf8'/%3E%3C/svg%3E">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/echarts/6.1.0/echarts.min.js"></script>
+<style>
+  /* 主题变量 */
+  :root {
+    --bg: #060a12;
+    --glow-1: rgba(56,189,248,.10);
+    --glow-2: rgba(99,102,241,.10);
+    --panel: rgba(14,22,38,.86);
+    --panel-2: #131e31;
+    --border: #1d2b45;
+    --text: #e8eefb;
+    --muted: #8ba1c0;
+    --dim: #62789a;
+    --accent: #38bdf8;
+    --accent-2: #818cf8;
+    --good: #34d399;
+    --warn: #fbbf24;
+    --danger: #f87171;
+    --radius: 14px;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  html,body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI","Microsoft YaHei","PingFang SC",system-ui,-apple-system,sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 0;
+    background: radial-gradient(900px 420px at 12% -8%, var(--glow-1), transparent 70%), radial-gradient(760px 380px at 96% 4%, var(--glow-2), transparent 72%);
+  }
+
+  /* 页面布局 */
+  .app {
+    position: relative;
+    z-index: 1;
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 26px 22px 50px;
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+  }
+
+  /* 顶部品牌、状态与操作 */
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+  }
+
+  .logo {
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
+    display: grid;
+    place-items: center;
+    font-size: 21px;
+    line-height: 1;
+    background: linear-gradient(145deg,rgba(56,189,248,.22),rgba(129,140,248,.22));
+    border: 1px solid rgba(56,189,248,.32);
+    box-shadow: 0 0 22px -6px rgba(56,189,248,.55);
+  }
+
+  .brand h1 {
+    margin: 0;
+    font-size: 19px;
+    font-weight: 650;
+    letter-spacing: .2px;
+  }
+
+  .brand .sub {
+    margin: 3px 0 0;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex-wrap: wrap;
+  }
+
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px;
+    font-size: 12.5px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: rgba(19,30,49,.7);
+    color: var(--muted);
+  }
+
+  .pill .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--dim);
+  }
+
+  .pill.off {
+    color: var(--dim);
+  }
+
+  .pill.unknown {
+    color: var(--muted);
+    border-style: dashed;
+  }
+
+  .pill.busy {
+    color: var(--warn);
+    border-color: rgba(251,191,36,.35);
+    background: rgba(251,191,36,.10);
+  }
+
+  .pill.busy .dot {
+    background: var(--warn);
+    box-shadow: 0 0 8px var(--warn);
+  }
+
+  .pill.open {
+    color: var(--good);
+    border-color: rgba(52,211,153,.32);
+    background: rgba(52,211,153,.08);
+  }
+
+  .pill.open .dot {
+    background: var(--good);
+    box-shadow: 0 0 8px var(--good);
+  }
+
+  .pill.cut {
+    color: var(--danger);
+    border-color: rgba(248,113,113,.42);
+    background: rgba(248,113,113,.12);
+  }
+
+  .pill.cut .dot {
+    background: var(--danger);
+    box-shadow: 0 0 9px var(--danger);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 15px;
+    border-radius: 9px;
+    font-size: 13px;
+    text-decoration: none;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    cursor: pointer;
+    transition: .18s;
+  }
+
+  .btn:hover {
+    border-color: rgba(56,189,248,.5);
+    color: var(--accent);
+  }
+
+  .btn.recharge {
+    border-color: transparent;
+    font-weight: 600;
+    background: linear-gradient(135deg,#0ea5e9,#6366f1);
+    color: #fff;
+    box-shadow: 0 8px 22px -12px rgba(56,189,248,.9);
+  }
+
+  .btn.recharge:hover {
+    filter: brightness(1.1);
+    color: #fff;
+    border-color: transparent;
+  }
+
+  .btn.recharge:active {
+    transform: translateY(1px);
+  }
+
+  .logout-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: var(--muted);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    margin-left: 4px;
+    text-decoration-color: rgba(139,161,192,.4);
+    transition: .16s;
+  }
+
+  .logout-link:hover {
+    color: var(--danger);
+    text-decoration-color: rgba(248,113,113,.6);
+  }
+
+  .logout-error {
+    color: var(--danger);
+    font-size: 11.5px;
+    margin-left: 6px;
+  }
+
+  .btn.small {
+    padding: 5px 11px;
+    font-size: 12px;
+  }
+
+  .eye {
+    background: none;
+    border: none;
+    padding: 0 2px;
+    margin: 0 2px;
+    color: var(--dim);
+    cursor: pointer;
+    display: inline-flex;
+    vertical-align: -2px;
+  }
+
+  .eye:hover {
+    color: var(--accent);
+  }
+
+  .eye .slash {
+    opacity: .85;
+  }
+
+  .eye.revealed .slash {
+    opacity: 0;
+  }
+
+  /* 统计卡片 */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(4,1fr);
+    gap: 13px;
+  }
+
+  .card.hero {
+    background: linear-gradient(160deg,rgba(56,189,248,.10),rgba(99,102,241,.06) 55%,transparent);
+    border-color: rgba(56,189,248,.24);
+  }
+
+  .card.hero.level-ok .card-value {
+    color: var(--accent);
+  }
+
+  .card.hero.level-warn {
+    border-color: rgba(251,191,36,.4);
+    background: linear-gradient(160deg,rgba(251,191,36,.13),transparent 65%);
+  }
+
+  .card.hero.level-warn .card-value {
+    color: var(--warn);
+  }
+
+  .card.hero.level-critical {
+    border-color: rgba(248,113,113,.45);
+    background: linear-gradient(160deg,rgba(248,113,113,.15),transparent 65%);
+  }
+
+  .card.hero.level-critical .card-value {
+    color: var(--danger);
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 15px 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    box-shadow: 0 18px 40px -30px rgba(0,0,0,.9);
+  }
+
+  .card-label {
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+
+  .card-value {
+    font-size: 34px;
+    font-weight: 700;
+    letter-spacing: -.3px;
+    line-height: 1.18;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card-value .unit {
+    font-size: 15px;
+    font-weight: 400;
+    color: var(--muted);
+    margin-left: 4px;
+  }
+
+  .card-foot {
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+
+  /* 内容面板 */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    min-width: 0;
+    padding: 15px 17px;
+    box-shadow: 0 18px 40px -30px rgba(0,0,0,.9);
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+  }
+
+  .panel-head h2 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 560;
+  }
+
+  .panel-head .hint {
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+
+  /* 快捷范围与自定义查询 */
+  .ranges {
+    display: flex;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+
+  .ranges a {
+    padding: 5px 11px;
+    font-size: 12px;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    text-decoration: none;
+    background: transparent;
+    transition: .16s;
+  }
+
+  .ranges a:hover {
+    color: var(--text);
+    border-color: rgba(56,189,248,.4);
+  }
+
+  .ranges a.active {
+    color: var(--accent);
+    border-color: rgba(56,189,248,.55);
+    background: rgba(56,189,248,.14);
+  }
+
+  .range-custom {
+    padding: 5px 11px;
+    font-size: 12px;
+    font-family: inherit;
+    border-radius: 7px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    background: transparent;
+    cursor: pointer;
+    transition: .16s;
+    line-height: 1.5;
+  }
+
+  .range-custom:hover {
+    color: var(--text);
+    border-color: rgba(56,189,248,.4);
+  }
+
+  .range-custom.active {
+    color: var(--accent);
+    border-color: rgba(56,189,248,.55);
+    background: rgba(56,189,248,.14);
+  }
+
+  .custom-range {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex-wrap: wrap;
+    margin: 0 0 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(13,23,39,.55);
+    border: 1px solid var(--border);
+  }
+
+  .cr-label {
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+
+  .custom-range input[type=datetime-local] {
+    padding: 6px 9px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: inherit;
+    background: #0d1727;
+    border: 1px solid var(--border);
+    color: var(--text);
+    outline: none;
+    color-scheme: dark;
+    transition: border-color .16s;
+  }
+
+  .custom-range input[type=datetime-local]:focus {
+    border-color: rgba(56,189,248,.55);
+  }
+
+  .cr-dash {
+    color: var(--dim);
+    font-size: 12px;
+  }
+
+  .cr-err {
+    font-size: 11.5px;
+    color: var(--danger);
+  }
+
+  /* 左侧画布借用面板内边距，让宽刻度向外延伸，绘图区位置保持固定。 */
+  /* 图表画布、单位与拖动时间 */
+  .chart {
+    width: calc(100% + 20px);
+    margin-left: -10px;
+    height: 320px;
+  }
+
+  /* dataZoom 会把图表光标设成手掌，这里压回普通箭头 */
+  .chart,.chart canvas {
+    cursor: default !important;
+  }
+
+  .chart.mid {
+    height: 260px;
+  }
+
+  .usage-chart-wrap {
+    position: relative;
+  }
+
+  /* 两张图左右各借10px，画布居中，保留手柄光晕的绘制空间。 */
+  .chart-unit {
+    position: absolute;
+    left: 16px;
+    top: 0;
+    font-size: 11px;
+    line-height: 16px;
+    color: var(--dim);
+    pointer-events: none;
+  }
+
+  .zoom-times {
+    position: absolute;
+    left: 2px;
+    right: 2px;
+    bottom: 0;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    visibility: hidden;
+    pointer-events: none;
+    font-size: 10px;
+    line-height: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .balance-panel {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .balance-panel .chart {
+    flex: 1;
+    min-height: 260px;
+  }
+
+  /* 图例和导出区 */
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 11.5px;
+    color: var(--muted);
+    padding: 8px 2px 8px;
+  }
+
+  .legend .lg {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .legend i {
+    width: 10px;
+    height: 10px;
+    border-radius: 3px;
+    display: inline-block;
+  }
+
+  .lg-bar {
+    background: #38bdf8;
+  }
+
+  .lg-occ {
+    background: rgba(52,211,153,.35);
+    border: 1px solid rgba(52,211,153,.5);
+  }
+
+  .panel-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 2px 0px;
+    border-top: 1px solid var(--border);
+  }
+
+  .panel-foot .hint {
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1.15fr 1fr;
+    gap: 13px;
+  }
+
+  /* 最近采集：表头与滚动区域 */
+  table {
+    width: 100%;
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 12.5px;
+  }
+
+  th,td {
+    padding: 8px 4px;
+    text-align: right;
+    border-bottom: 1px solid rgba(29,43,69,.55);
+    white-space: nowrap;
+  }
+
+  th:first-child,td:first-child {
+    text-align: left;
+    padding-left: 8px;
+  }
+
+  th:last-child,td:last-child {
+    padding-right: 8px;
+  }
+
+  th:not(:first-child) {
+    text-align: center;
+  }
+
+  td.num {
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th {
+    color: var(--dim);
+    font-weight: 500;
+    font-size: 11.5px;
+    letter-spacing: .02em;
+    background: #0f1a2b;
+    box-shadow: inset 0 -1px 0 rgba(29,43,69,.9);
+  }
+
+  tbody tr {
+    transition: background .14s;
+  }
+
+  tbody tr:hover td {
+    background: rgba(56,189,248,.05);
+  }
+
+  tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  td.time {
+    color: var(--muted);
+  }
+
+  td.delta {
+    color: var(--dim);
+  }
+
+  td.delta.used {
+    color: var(--danger);
+  }
+
+  td.collection-error {
+    color: var(--warn);
+    font-size: 11.5px;
+  }
+
+  /* 表头完全置于滚动区外；两层预留相同的滚动条宽度，保持各列对齐。 */
+  .table-head,.table-wrap {
+    overflow-x: hidden;
+    overflow-y: scroll;
+    scrollbar-width: thin;
+  }
+
+  .table-head {
+    scrollbar-color: transparent transparent;
+  }
+
+  .table-wrap {
+    max-height: 260px;
+    scrollbar-color: rgba(125,211,252,.28) transparent;
+  }
+
+  .table-wrap:hover {
+    scrollbar-color: rgba(125,211,252,.48) transparent;
+  }
+
+  .table-head::-webkit-scrollbar,.table-wrap::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .table-head::-webkit-scrollbar-thumb,.table-head::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .table-wrap::-webkit-scrollbar-thumb {
+    background: rgba(125,211,252,.28);
+    background-clip: padding-box;
+    border: 2px solid transparent;
+    border-radius: 10px;
+    min-height: 36px;
+  }
+
+  .table-wrap::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(125,211,252,.48);
+  }
+
+  .table-wrap::-webkit-scrollbar-thumb:active {
+    background-color: rgba(56,189,248,.7);
+  }
+
+  .table-wrap::-webkit-scrollbar-track {
+    background: transparent;
+    margin-block: 4px;
+  }
+
+  .table-head::-webkit-scrollbar-button,.table-wrap::-webkit-scrollbar-button {
+    display: none;
+  }
+
+  /* 页脚和加载反馈 */
+  footer {
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+
+  .msg {
+    padding: 56px 20px;
+    text-align: center;
+    color: var(--muted);
+    font-size: 13.5px;
+  }
+
+  .msg.err {
+    color: var(--danger);
+  }
+
+  @media (max-width:920px) {
+    .cards {
+      grid-template-columns: repeat(2,1fr);
+    }
+    .grid2 {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* ── 登录页 ─────────────────────────────────────────────── */
+  .app.login-page {
+    max-width: none;
+    padding: 0;
+    gap: 0;
+  }
+
+  .login-wrap {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .login-card {
+    width: 100%;
+    max-width: 352px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 28px 26px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    box-shadow: 0 40px 80px -48px rgba(0,0,0,.95);
+  }
+
+  .login-brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 2px;
+  }
+
+  .login-bolt {
+    width: 42px;
+    height: 42px;
+    flex: 0 0 42px;
+    display: grid;
+    place-items: center;
+    font-size: 20px;
+    line-height: 1;
+    border-radius: 12px;
+    background: linear-gradient(160deg,rgba(56,189,248,.16),rgba(99,102,241,.08));
+    border: 1px solid rgba(56,189,248,.22);
+  }
+
+  .login-brand h1 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 650;
+    letter-spacing: .2px;
+  }
+
+  .login-brand p {
+    margin: 3px 0 0;
+    font-size: 11.5px;
+    color: var(--dim);
+  }
+
+  .login-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .login-field span {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .login-field input {
+    padding: 10px 12px;
+    border-radius: 10px;
+    font-size: 13.5px;
+    background: #0d1727;
+    border: 1px solid var(--border);
+    color: var(--text);
+    outline: none;
+    transition: border-color .16s,box-shadow .16s;
+  }
+
+  .login-field input::placeholder {
+    color: #4a5c78;
+  }
+
+  .login-field input:focus {
+    border-color: rgba(56,189,248,.55);
+    box-shadow: 0 0 0 3px rgba(56,189,248,.12);
+  }
+
+  .login-err {
+    margin: 0;
+    font-size: 12px;
+    color: var(--danger);
+    background: rgba(248,113,113,.09);
+    border: 1px solid rgba(248,113,113,.25);
+    border-radius: 9px;
+    padding: 8px 10px;
+  }
+
+  .login-submit {
+    padding: 11px;
+    border-radius: 10px;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+    letter-spacing: 1px;
+    background: linear-gradient(135deg,#0ea5e9,#6366f1);
+    box-shadow: 0 10px 26px -14px rgba(56,189,248,.95);
+    transition: .18s;
+  }
+
+  .login-submit:hover {
+    filter: brightness(1.09);
+  }
+
+  .login-submit:active {
+    transform: translateY(1px);
+  }
+
+  .login-submit:disabled {
+    opacity: .6;
+    cursor: default;
+    filter: none;
+  }
+
+  .login-foot {
+    margin: 0;
+    text-align: center;
+    font-size: 11px;
+    color: #4d5f7b;
+  }
+
+  @media (max-width:520px) {
+    .desktop-zoom-hint {
+      display: none;
+    }
+    .app {
+      padding-top: 20px;
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+    .topbar {
+      row-gap: 13px;
+      margin-bottom: -3px;
+    }
+    /* 窄屏统一缩小卡片字号，避免数值和单位折行。 */
+    .card-value {
+      font-size: 28px;
+    }
+    .card-value .unit {
+      font-size: 13px;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <div class="msg">正在读取数据…</div>
+</div>
+
+<script>
+// 服务端注入与通用工具
+const SESSION = "__SESSION_PLACEHOLDER__";
+const DATA = "__DATA_PLACEHOLDER__";
+
+const pad = (n) => String(n).padStart(2, '0');
+const fmt = (v, d = 2) => (typeof v === 'number' ? v.toFixed(d) : '—');
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g,
+  char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+
+const sampleTime = (ts) => Number.isFinite(ts)
+  ? new Date((ts + 8 * 3600) * 1000).toISOString().slice(0, 19).replace('T', ' ')
+  : '—';
+
+// 9999是采集超时标记，其余数值才按实际毫秒换算。
+const fmtSeconds = (v) => (v === 9999 ? '超时' : v == null ? '—' : `${(v / 1000).toFixed(2)}s`);
+// 图表按UTC排布刻度，时间坐标平移东八区；原始Unix时间戳保持不变。
+const toChartTime = (ts) => (ts + 8 * 3600) * 1000;
+const fromChartTime = (value) => value / 1000 - 8 * 3600;
+
+// 可见区间统计：二分查找与边界插值
+function pointIndexAt(points, time, after = false) {
+  let low = 0;
+  let high = points.length;
+  while (low < high) {
+    const mid = low + Math.floor((high - low) / 2);
+    if (points[mid].t < time || (after && points[mid].t === time)) low = mid + 1;
+    else high = mid;
+  }
+  return low;
+}
+function valueExtentForRange(points, field, from, to) {
+  let low = Infinity;
+  let high = -Infinity;
+  const include = value => {
+    low = Math.min(low, value);
+    high = Math.max(high, value);
+  };
+  const first = pointIndexAt(points, from);
+  const end = pointIndexAt(points, to, true);
+  for (let i = first; i < end; i++) {
+    const p = points[i];
+    if (Number.isFinite(p[field])) include(p[field]);
+  }
+  for (const boundary of [from, to]) {
+    const i = pointIndexAt(points, boundary);
+    const p = points[i];
+    const prev = points[i - 1];
+    if (p && prev && Number.isFinite(prev[field]) && Number.isFinite(p[field])
+      && prev.t < boundary && boundary < p.t) {
+      include(prev[field] + (p[field] - prev[field]) * (boundary - prev.t) / (p.t - prev.t));
+    }
+  }
+  return Number.isFinite(low) ? [low, high] : null;
+}
+function powerCeilingForRange(points, from, to) {
+  const peak = valueExtentForRange(points, 'w', from, to)?.[1] ?? 0;
+  return Math.max(500, Math.ceil(peak * 1.05 / 500) * 500);
+}
+function balanceAxisForRange(points, from, to) {
+  const extent = valueExtentForRange(points, 'b', from, to);
+  return {
+    min: Math.min(0, Math.floor(extent?.[0] ?? 0)),
+    max: Math.max(1, Math.ceil(extent?.[1] ?? 0))
+  };
+}
+
+// 固定ECharts 6.1适配：原生折线裁切会向外扩半个线宽，额外约束到精确绘图区。
+function clipLineToPlot(chart, clips) {
+  const model = chart.getModel().getSeriesByIndex?.(0);
+  const rect = model?.coordinateSystem?.getArea?.();
+  const view = model && chart.getViewOfSeriesModel?.(model);
+  if (!rect || !view) return;
+  for (const path of [view._polyline, view._polygon]) {
+    if (!path) continue;
+    let saved = clips.get(path);
+    if (!saved) {
+      saved = { clip: new echarts.graphic.Rect() };
+      clips.set(path, saved);
+      path.setClipPath(saved.clip);
+    }
+    if (saved.x !== rect.x || saved.y !== rect.y || saved.width !== rect.width || saved.height !== rect.height) {
+      Object.assign(saved, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+      saved.clip.setShape({ x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    }
+  }
+}
+
+function chartTimeExtent(chart) {
+  return chart.getModel().getComponent('xAxis', 0).axis.scale.getExtent();
+}
+
+const fmtDateTime = (ts) => {
+  if (!Number.isFinite(ts)) return '—';
+  const d = new Date(toChartTime(ts));
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+};
+
+const HIDDEN_IDENT = '•••••• · ••••••';
+
+// 页面操作：身份显示、刷新、自定义范围与登出
+function bindToggles(room, serial) {
+  const ident = document.getElementById('ident');
+  const eye = document.getElementById('eyeBtn');
+  if (eye && ident) {
+    const full = `${room || '—'} · ${serial || '—'}`;
+    eye.addEventListener('click', () => {
+      const shown = eye.classList.toggle('revealed');
+      ident.textContent = shown ? full : HIDDEN_IDENT;
+      eye.title = shown ? '隐藏房间号' : '显示房间号';
+    });
+  }
+  const refresh = document.getElementById('refreshBtn');
+  if (refresh) refresh.addEventListener('click', () => location.reload());
+
+  const customBtn = document.getElementById('customRangeBtn');
+  const customPanel = document.getElementById('customRange');
+  if (customBtn && customPanel) {
+    customBtn.addEventListener('click', () => {
+      customPanel.hidden = !customPanel.hidden;
+      if (!customPanel.hidden) document.getElementById('fromInput').focus();
+    });
+  }
+
+  const applyRange = document.getElementById('applyRange');
+  if (applyRange) {
+    applyRange.addEventListener('click', () => {
+      const from = document.getElementById('fromInput').value;
+      const to = document.getElementById('toInput').value;
+      const err = document.getElementById('rangeErr');
+      if (!from || !to) { err.textContent = '请选择起止时间'; return; }
+      if (from >= to) { err.textContent = '结束时间要晚于开始时间'; return; }
+      err.textContent = '';
+      location.href = `/?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+    });
+  }
+
+  const logout = document.getElementById('logoutBtn');
+  if (logout) {
+    logout.addEventListener('click', async () => {
+      logout.disabled = true;
+      const error = document.getElementById('logoutError');
+      if (error) error.hidden = true;
+      try {
+        const response = await fetch('/logout', { method: 'POST' });
+        const body = await response.json().catch(() => null);
+        if (!response.ok || body?.success !== true) throw new Error('logout failed');
+        location.replace('/');
+      } catch {
+        if (error) {
+          error.textContent = '登出失败，请重试';
+          error.hidden = false;
+        }
+      } finally {
+        logout.disabled = false;
+      }
+    });
+  }
+}
+
+function fail(msg) {
+  document.getElementById('app').innerHTML =
+    '<div class="msg err"><p id="loadError"></p><a class="btn" href="/">返回默认范围</a> <button class="btn" id="retryBtn" type="button">重试</button></div>';
+  document.getElementById('loadError').textContent = `数据加载失败：${msg}`;
+  document.getElementById('retryBtn').addEventListener('click', () => location.reload());
+}
+
+// 登录视图
+function showLogin() {
+  document.getElementById('app').classList.add('login-page');
+  document.getElementById('app').innerHTML = `
+    <div class="login-wrap">
+      <form class="login-card" id="loginForm" autocomplete="on">
+        <div class="login-brand">
+          <span class="login-bolt">⚡</span>
+          <div>
+            <h1>用电监测系统</h1>
+            <p>登录后查看自己的用电情况</p>
+          </div>
+        </div>
+
+        <label class="login-field">
+          <span>账号</span>
+          <input id="userInput" type="text" placeholder="请输入账号"
+                 autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        </label>
+
+        <label class="login-field">
+          <span>密码</span>
+          <input id="pwInput" type="password" placeholder="请输入密码"
+                 autocomplete="current-password" required>
+        </label>
+
+        <p class="login-err" id="loginErr" hidden></p>
+
+        <button class="login-submit" id="loginBtn" type="submit">登录</button>
+        <p class="login-foot">忘记密码请联系管理员</p>
+      </form>
+    </div>`;
+
+  const form = document.getElementById('loginForm');
+  const err = document.getElementById('loginErr');
+  const btn = document.getElementById('loginBtn');
+  const userEl = document.getElementById('userInput');
+
+  const say = (msg) => { err.textContent = msg; err.hidden = false; };
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const user = userEl.value.trim();
+    const pw = document.getElementById('pwInput').value;
+    if (!user || !pw) return say('请输入账号和密码');
+
+    btn.disabled = true;
+    btn.textContent = '登录中…';
+    err.hidden = true;
+
+    try {
+      const res = await fetch('/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ user, pw }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok && body.success) {
+        location.reload();
+        return;
+      }
+      say(body.error || '登录失败，请重试');
+    } catch {
+      say('网络异常，请稍后重试');
+    }
+
+    btn.disabled = false;
+    btn.textContent = '登录';
+  });
+
+  userEl.focus();
+}
+
+// 看板主流程：数据准备与HTML渲染
+function main() {
+  if (!SESSION || !SESSION.loggedIn) return showLogin();
+  if (!DATA) return fail('服务器没有返回数据');
+  if (DATA.error) return fail(DATA.error);
+  if (!DATA.points.length && !DATA.recent?.length) return fail('这个时间范围内没有数据，换个范围试试');
+
+  const { meter, status, stats, points, shades, recent, ranges, range } = DATA;
+  const firstDataTime = points[0]?.t ?? meter.latest.ts;
+  const lastDataTime = points[points.length - 1]?.t ?? meter.latest.ts;
+  const room = meter.room || '未知门牌';
+
+  const WARN = 5;
+  const CRITICAL = 2;
+  const balanceValue = meter.latest.balance;
+  const balanceLevel = balanceValue == null ? 'ok'
+    : balanceValue <= CRITICAL ? 'critical'
+    : balanceValue <= WARN ? 'warn' : 'ok';
+  const peakBalance = points.reduce((peak, point) => Number.isFinite(point.b)
+    ? Math.max(peak ?? point.b, point.b) : peak, null);
+  const balanceHint = balanceValue == null ? '暂无数据'
+    : balanceLevel === 'critical' ? '余额严重不足，建议立即充值'
+    : balanceLevel === 'warn' ? '余额低，建议尽快充值'
+    : `区间峰值 ${fmt(peakBalance)} 元`;
+  const rangeLabel = (ranges.find(([k]) => k === range) || [null, '当前区间'])[1];
+
+  const hasArrears = Number.isFinite(balanceValue) && balanceValue <= 0;
+  const left = hasArrears ? null : stats.days_left;
+  const leftText = left == null ? '—'
+    : left < 1
+      ? `${Math.round(left * 24 * 10) / 10}`
+      : `${Math.round(left * 10) / 10}`;
+
+  const isCustom = range === 'custom';
+  const rangeLinks = ranges.map(([k, label]) =>
+    `<a href="?range=${encodeURIComponent(k)}" class="${k === range ? 'active' : ''}">${escapeHtml(label)}</a>`
+  ).join('') + `<button class="range-custom${isCustom ? ' active' : ''}" id="customRangeBtn" type="button">自定义</button>`;
+
+  const toLocalTime = (ts) => new Date((ts + 8 * 3600) * 1000).toISOString().slice(0, 19);
+  const toLocalInput = (ts) => toLocalTime(ts).slice(0, 16);
+  const winTo = DATA.window ? DATA.window.to : (meter.latest ? meter.latest.ts : Math.floor(Date.now() / 1000));
+  const winFrom = DATA.window ? DATA.window.from : winTo - 30 * 86400;
+
+  const footerNote = '当前采集间隔2分钟 · 人在状态根据用电变化推测，仅供参考';
+
+  const exportHref = DATA.window
+    ? `/export?from=${encodeURIComponent(toLocalTime(DATA.window.from))}&to=${encodeURIComponent(toLocalTime(DATA.window.to))}`
+    : `/export?range=${range}`;
+  const sampleColumns = '<colgroup><col style="width:36%"><col style="width:22%"><col style="width:14%"><col style="width:14%"><col style="width:14%"></colgroup>';
+
+  document.getElementById('app').innerHTML = `
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">⚡</div>
+        <div>
+          <h1>用电监测系统</h1>
+          <p class="sub">
+            <span id="ident">${HIDDEN_IDENT}</span>
+            <button class="eye" id="eyeBtn" type="button" title="显示 / 隐藏房间号">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none"
+                   stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+                <path d="M1.8 12S5.4 5.6 12 5.6 22.2 12 22.2 12 18.6 18.4 12 18.4 1.8 12 1.8 12Z"/>
+                <circle cx="12" cy="12" r="3.1"/>
+                <path class="slash" d="M3.5 3.5 20.5 20.5"/>
+              </svg>
+            </button><button class="logout-link" id="logoutBtn" type="button">登出</button>
+            <span class="logout-error" id="logoutError" role="status" hidden></span>
+          </p>
+        </div>
+      </div>
+      <div class="actions">
+        <span class="pill ${status.occupied === null ? 'unknown' : status.occupied ? 'busy' : 'off'}"
+              title="最近一次采集保存的有人状态">
+          <i class="dot"></i><span>${status.occupied === null ? '未知' : status.occupied ? '有人' : '无人'}</span>
+        </span>
+        ${meter.valve ? `<span class="pill ${meter.valve.code === 0 ? 'open' : meter.valve.code === 1 ? 'cut' : ''}">
+          <i class="dot"></i><span>${escapeHtml(meter.valve.name)}</span>
+        </span>` : ''}
+        <button class="btn" id="refreshBtn" type="button">刷新</button>
+        ${SESSION.rechargeEnabled ? `<a class="btn recharge" href="/recharge"
+           target="_blank" rel="noopener">充值</a>` : ''}
+      </div>
+    </header>
+
+    <section class="cards">
+      <div class="card hero level-${balanceLevel}">
+        <span class="card-label">当前剩余电费</span>
+        <span class="card-value">${fmt(meter.latest.balance)}<span class="unit">元</span></span>
+        <span class="card-foot">${balanceHint}</span>
+      </div>
+      <div class="card">
+        <span class="card-label">区间消耗</span>
+        <span class="card-value">${fmt(stats.window_cost)}<span class="unit">元</span></span>
+        <span class="card-foot">${stats.recharge_count > 0
+          ? `区间充值 ${stats.recharge_amount} 元（${stats.recharge_count} 次）`
+          : '区间内无充值记录'}</span>
+      </div>
+      <div class="card">
+        <span class="card-label">日均消耗</span>
+        <span class="card-value">${stats.avg_daily_cost == null ? '—' : stats.avg_daily_cost.toFixed(2)}<span class="unit">元/天</span></span>
+        <span class="card-foot">按 ${escapeHtml(rangeLabel)} 推算 · 日均 ${fmt(stats.avg_daily_kwh)} kWh</span>
+      </div>
+      <div class="card">
+        <span class="card-label">预计可用</span>
+        <span class="card-value">${hasArrears ? '已欠费' : leftText}${left == null ? '' : `<span class="unit">${left < 1 ? '小时' : '天'}</span>`}</span>
+        <span class="card-foot">${hasArrears ? '请及时充值' : stats.exhausted_at ? `预计耗尽于 ${fmtDateTime(stats.exhausted_at)}` : '暂无消耗速率'}</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>用电功率</h2>
+          <span class="hint">区间用电 ${fmt(stats.window_kwh)} kWh · 有人时长 ${stats.window_hours} 小时</span>
+        </div>
+        <div class="ranges">${rangeLinks}</div>
+      </div>
+      <div class="custom-range" id="customRange" ${isCustom ? '' : 'hidden'}>
+        <span class="cr-label">自定义区间</span>
+        <input type="datetime-local" id="fromInput" step="60" value="${toLocalInput(winFrom)}">
+        <span class="cr-dash">—</span>
+        <input type="datetime-local" id="toInput" step="60" value="${toLocalInput(winTo)}">
+        <button class="btn small" id="applyRange" type="button">应用</button>
+        <span class="cr-err" id="rangeErr"></span>
+      </div>
+      <div class="usage-chart-wrap">
+        <div id="chart-usage" class="chart"></div>
+        <span class="chart-unit">W</span>
+        <div class="zoom-times" id="zoomTimes"><span id="zoomFrom"></span><span id="zoomTo"></span></div>
+      </div>
+      <div class="legend">
+        <span class="lg"><i class="lg-bar"></i>平均功率（20 分钟）</span>
+        <span class="lg"><i class="lg-occ"></i>有人用电时段</span>
+        <span class="lg" style="margin-left:auto"><span class="desktop-zoom-hint">滚轮缩放 · </span>拖滑块调范围</span>
+      </div>
+      <div class="panel-foot">
+        <a class="btn small" href="${exportHref}">导出数据</a>
+        <span class="hint">共 ${points.length} 条数据</span>
+      </div>
+    </section>
+
+    <div class="grid2">
+      <section class="panel balance-panel">
+        <div class="panel-head"><h2>余额变化</h2></div>
+        <div id="chart-balance" class="chart mid"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><h2>最近采集</h2><span class="hint">最新 ${recent.length} 条</span></div>
+        <div class="table-head">
+          <table>
+            ${sampleColumns}
+            <thead><tr><th>数据时间</th><th class="num">读数 kWh</th><th class="num">用电</th><th class="num">余额 元</th><th class="num">耗时</th></tr></thead>
+          </table>
+        </div>
+        <div class="table-wrap">
+          <table aria-label="最近采集数据">
+            ${sampleColumns}
+            <tbody>
+              ${recent.map(r => {
+                const time = sampleTime(r.ts);
+                return `<tr>
+                <td class="time" title="${escapeHtml(time)}">${escapeHtml(time.length >= 16 ? time.slice(5) : time)}</td>
+                <td class="num${r.error ? ' collection-error' : ''}">${r.error ? '采集失败' : fmt(r.kwh)}</td>
+                <td class="num delta${r.delta > 0 ? ' used' : ''}">${r.error || r.delta == null ? '—' : r.delta.toFixed(2)}</td>
+                <td class="num">${r.error ? '—' : fmt(r.balance)}</td>
+                <td class="num">${fmtSeconds(r.ms)}</td>
+              </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <footer>${footerNote} · ©Hogum</footer>
+  `;
+
+  bindToggles(room, meter.serial_no);
+
+  // 时间轴按东八区显示，日期标在中午12点；密度随可见跨度和画布宽度调整。
+  const axisSpanDays = points.length >= 2
+    ? (points[points.length - 1].t - points[0].t) / 86400
+    : 0;
+  const axisSplit = axisSpanDays <= 1.5 ? null
+    : axisSpanDays <= 4 ? 6
+      : axisSpanDays <= 12 ? 12
+        : 50;
+
+  const chartRef = { usage: null, balance: null };
+
+  // 缓存可见跨度，避免每个刻度格式化时深拷贝getOption()。
+  const spanCache = { usage: axisSpanDays, balance: axisSpanDays };
+  const spanOf = (which) => spanCache[which];
+  const narrowAxis = (which) => {
+    const width = chartRef[which]?.getWidth()
+      ?? document.getElementById(`chart-${which === 'usage' ? 'usage' : 'balance'}`)?.clientWidth
+      ?? 800;
+    return width < 520;
+  };
+
+  // 日期固定标在 12 点，其他标签按可见跨度调整。
+  const makeTimeLabel = (which) => (v) => {
+    const d = new Date(v);
+    const span = spanOf(which);
+    const h = d.getUTCHours();
+    const md = `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+    // 窄屏多日视图仅在中午显示日期，隐藏小时以避免重叠。
+    if (span >= 1.5 && narrowAxis(which)) return h === 12 ? `{day|${md}}` : '';
+    if (h === 12) return `{day|${md}}`;
+    if (span >= 7) return '';
+    if (span < 0.5) return `{hm|${pad(h)}:${pad(d.getUTCMinutes())}}`;
+    return `{hm|${pad(h)}:00}`;
+  };
+
+  /** 刻度最小间隔：都是 12 小时的因数，12:00 保证落在刻度上 */
+  const minIntervalOf = (spanDays, which) => (
+    spanDays >= 1.5 && narrowAxis(which) ? 43200000 : spanDays >= 0.5 ? 21600000 : 3600000
+  );
+  // 窄屏多日视图固定半天刻度，确保生成12点刻度；其他视图放开上限。
+  const maxIntervalOf = (spanDays, which) => (
+    spanDays >= 1.5 && narrowAxis(which) ? 43200000 : Number.MAX_SAFE_INTEGER
+  );
+
+  // dataZoom 配置可能滞后，优先读取坐标轴的实际可见范围。
+  const measureSpan = (chart, fallback) => {
+    try {
+      const ext = chartTimeExtent(chart);
+      if (Number.isFinite(ext[0]) && Number.isFinite(ext[1]) && ext[1] > ext[0]) {
+        return (ext[1] - ext[0]) / 86400000;
+      }
+    } catch (e) {
+      // 内部接口变了就退回 dataZoom
+    }
+    const dz = chart.getOption()?.dataZoom?.[0];
+    if (dz) {
+      if (Number.isFinite(dz.startValue) && Number.isFinite(dz.endValue)) {
+        return (dz.endValue - dz.startValue) / 86400000;
+      }
+      if (Number.isFinite(dz.start) && Number.isFinite(dz.end)) {
+        return fallback * (dz.end - dz.start) / 100;
+      }
+    }
+    return fallback;
+  };
+
+  // 刻度与纵轴更新缓存
+  const axisUpdateCache = new WeakMap();
+  const labelModeFor = (span, which) => span >= 7 || (span >= 1.5 && narrowAxis(which))
+    ? 'date' : span < 0.5 ? 'minute' : 'hour';
+  const rememberAxes = (chart, which, yAxis) => {
+    axisUpdateCache.set(chart, {
+      minInterval: minIntervalOf(axisSpanDays, which),
+      maxInterval: maxIntervalOf(axisSpanDays, which),
+      labelMode: labelModeFor(axisSpanDays, which),
+      yAxis,
+      from: firstDataTime,
+      to: lastDataTime,
+    });
+  };
+  /** 每帧计算一次，只在刻度档位或纵轴数值发生变化时更新配置。 */
+  let refreshing = false;
+  const refreshDensity = (chart, which) => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      const ext = chartTimeExtent(chart);
+      if (!ext.every(Number.isFinite)) return;
+      const span = ext[1] > ext[0] ? (ext[1] - ext[0]) / 86400000 : measureSpan(chart, axisSpanDays);
+      spanCache[which] = span;
+      const previous = axisUpdateCache.get(chart);
+      const minInterval = minIntervalOf(span, which);
+      const maxInterval = maxIntervalOf(span, which);
+      const labelMode = labelModeFor(span, which);
+      const from = fromChartTime(ext[0]);
+      const to = fromChartTime(ext[1]);
+      const yAxis = previous && previous.from === from && previous.to === to
+        ? previous.yAxis
+        : which === 'usage'
+          ? { max: powerCeilingForRange(points, from, to) }
+          : balanceAxisForRange(points, from, to);
+      const update = {};
+      if (!previous || previous.minInterval !== minInterval || previous.maxInterval !== maxInterval
+        || previous.labelMode !== labelMode) {
+        update.xAxis = { minInterval, maxInterval };
+      }
+      if (!previous || previous.yAxis.min !== yAxis.min || previous.yAxis.max !== yAxis.max)
+        update.yAxis = yAxis;
+      axisUpdateCache.set(chart, { minInterval, maxInterval, labelMode, yAxis, from, to });
+      if (update.xAxis || update.yAxis) chart.setOption(update);
+    } finally {
+      refreshing = false;
+    }
+  };
+
+  // 两张图共用的坐标轴与tooltip样式
+  const axis = {
+    axisLine: { lineStyle: { color: '#1d2b45' } },
+    axisLabel: {
+      color: '#8ba1c0', fontSize: 11, fontFamily: 'sans-serif',
+      rich: {
+        day: { color: '#38bdf8', fontSize: 12, fontWeight: 700 },
+        hm: { color: '#7d92b1', fontSize: 11, fontWeight: 400 },
+      },
+    },
+    axisTick: { show: false },
+    splitLine: { lineStyle: { color: 'rgba(29,43,69,.6)' } },
+  };
+  const tooltip = {
+    trigger: 'axis',
+    // 点击后固定提示，confine 防止小屏气泡超出面板。
+    confine: true,
+    backgroundColor: '#0e1626',
+    borderColor: '#1d2b45',
+    textStyle: { color: '#e8eefb', fontSize: 12 },
+    axisPointer: { lineStyle: { color: 'rgba(56,189,248,.35)' } },
+  };
+  // 支持滚轮缩放和滑块调范围，关闭绘图区拖动平移，避免干扰tooltip。
+  // 画布补偿与拖动条配置（对应上方CSS的借用空间）
+  const chartCanvasLeftBleed = 10;
+  const usageCanvasBleed = 10;
+  const insideZoom = (extra = {}) => ({
+    type: 'inside',
+    filterMode: 'none',
+    zoomOnMouseWheel: true,
+    moveOnMouseMove: false,
+    moveOnMouseWheel: false,
+    ...extra,
+  });
+  const zoom = () => ([
+    insideZoom({ throttle: 60 }),
+    {
+      type: 'slider',
+      filterMode: 'none',
+      // 原生详情显示在手柄外侧，窄屏边缘容易裁切，改用条下方的时间提示。
+      showDetail: false,
+      brushSelect: false,
+      height: 28,
+      // 左右对称留白，让拖动条居中，并为圆形手柄保留空间。
+      bottom: 14,
+      left: 12 + chartCanvasLeftBleed,
+      right: 18 + usageCanvasBleed,
+      borderRadius: 17,
+      borderColor: 'rgba(56,189,248,.20)',
+      backgroundColor: 'rgba(12,21,36,.98)',
+      fillerColor: 'rgba(56,189,248,.05)',
+      handleIcon: 'path://M512,512 m-330,0 a330,330 0 1 0 660,0 a330,330 0 1 0 -660,0',
+      handleSize: '90%',
+      handleStyle: {
+        color: '#7dd3fc',
+        borderColor: '#0b1626',
+        borderWidth: 2,
+        shadowBlur: 8,
+        shadowColor: 'rgba(56,189,248,.7)',
+      },
+      moveHandleSize: 0,
+      dataBackground: {
+        lineStyle: { color: 'rgba(125,211,252,.55)', width: 1.2 },
+        areaStyle: { color: 'rgba(56,189,248,.22)' },
+      },
+      selectedDataBackground: {
+        lineStyle: { color: '#7dd3fc', width: 1.4 },
+        areaStyle: { color: 'rgba(56,189,248,.28)' },
+      },
+      textStyle: { color: '#5b7290', fontSize: 9.5 },
+    },
+  ]);
+
+  // 用电功率图
+  const pointsByTime = new Map(points.map(p => [toChartTime(p.t), p]));
+  const timeBounds = {
+    min: toChartTime(firstDataTime - (firstDataTime === lastDataTime ? 60 : 0)),
+    max: toChartTime(lastDataTime + (firstDataTime === lastDataTime ? 60 : 0))
+  };
+  // 以“3k”的实际字宽对齐标题左缘，300等宽刻度自然向面板留白延伸。
+  const tickMeasure = document.createElement?.('canvas')?.getContext('2d');
+  if (tickMeasure) tickMeasure.font = '11px sans-serif';
+  const referenceTickWidth = tickMeasure?.measureText('3k').width ?? 12;
+  const chartSides = { left: chartCanvasLeftBleed + 4 + referenceTickWidth, right: 16 };
+  const chartGrid = (top, bottom) => ({
+    ...chartSides,
+    right: chartSides.right + usageCanvasBleed,
+    top,
+    bottom,
+    containLabel: false,
+    outerBoundsMode: 'none'
+  });
+  const timeAxis = (which) => ({
+    type: 'time',
+    ...axis,
+    ...timeBounds,
+    splitLine: { show: false },
+    ...(axisSplit ? { splitNumber: axisSplit } : {}),
+    minInterval: minIntervalOf(axisSpanDays, which),
+    maxInterval: maxIntervalOf(axisSpanDays, which),
+    axisLabel: {
+      ...axis.axisLabel,
+      formatter: makeTimeLabel(which),
+      hideOverlap: true,
+      showMinLabel: false,
+      showMaxLabel: false
+    }
+  });
+  const initialPowerAxis = {
+    max: powerCeilingForRange(points, firstDataTime, lastDataTime)
+  };
+  const usage = echarts.init(document.getElementById('chart-usage'));
+  usage.setOption({
+    useUTC: true,
+    backgroundColor: 'transparent',
+    // ECharts 6需关闭outerBounds自动收缩，确保刻度变化时绘图区位置不变。
+    // 顶部固定预留单位和最大刻度空间，避免关闭自动布局后裁切文字。
+    grid: chartGrid(24, 66),
+    tooltip: {
+      ...tooltip,
+      formatter: (ps) => {
+        const p = ps[0];
+        if (!p) return '';
+        const point = pointsByTime.get(p.value[0]);
+        const kwh = point?.d;
+        const watts = Number.isFinite(kwh) && point?.gap > 0
+          ? Math.round(kwh / point.gap * 3600000) : null;
+        const special = point?.kind === 'heater_burst'
+          ? `近 ${Math.round(point.burst_seconds / 60)} 分钟用电 ${point.burst_kwh.toFixed(2)} 度，疑似热水器`
+          : point?.kind === 'heater'
+            ? `用电超过 ${stats.occupancy_rule?.heater_step ?? 0.1} 度/${Math.round((stats.occupancy_rule?.base_seconds ?? 182) / 60)} 分钟，疑似热水器`
+          : point?.bridged_idle && kwh === 0
+            ? '短时 0 消耗，保持判定'
+          : '';
+        return fmtDateTime(fromChartTime(p.value[0])).slice(5)
+          + `<br/>用电 <b>${kwh == null ? '—' : kwh.toFixed(2)}</b> 度`
+          + `<br/>功率 <b>${watts == null ? '—' : watts}</b> W`
+          + `<br/>间隔 <b>${point?.gap > 0 ? Math.round(point.gap / 60) : '—'}</b> 分钟`
+          + (special ? `<br/>${special}` : '');
+      },
+    },
+    dataZoom: zoom(),
+    xAxis: timeAxis('usage'),
+    yAxis: {
+      type: 'value', min: 0, splitNumber: 4,
+      ...axis,
+      ...initialPowerAxis,
+      axisLabel: {
+        ...axis.axisLabel,
+        margin: 4,
+        formatter: (v) => (v >= 1000 ? `${v / 1000}k` : v)
+      },
+    },
+    series: [{
+      type: 'line',
+      data: points.map(p => [toChartTime(p.t), p.w]),
+      symbol: 'none',
+      smooth: 0.25,
+      sampling: 'lttb',
+      lineStyle: { width: 1.6, color: '#38bdf8' },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(56,189,248,.24)' },
+          { offset: 1, color: 'rgba(56,189,248,0)' },
+        ]),
+      },
+      markArea: {
+        silent: true,
+        itemStyle: { color: 'rgba(52,211,153,.10)' },
+        data: [
+          ...shades.map(([a, b]) => [{ xAxis: toChartTime(a) }, { xAxis: toChartTime(b) }]),
+          ...(DATA.unknown_shades || []).map(([a, b]) => [{ xAxis: toChartTime(a),
+            itemStyle: { color: 'rgba(139,161,192,.10)', borderColor: 'rgba(139,161,192,.25)', borderWidth: 1, borderType: 'dashed' } }, { xAxis: toChartTime(b) }]),
+        ],
+      },
+    }],
+  });
+
+  // 双击底部滑块恢复全览：ECharts 的 slider 没有双击事件，
+  // 这里在画布上监听，判断落点是否在滑块所在的那一条带子里。
+  usage.getZr().on('dblclick', (ev) => {
+    const h = usage.getHeight();
+    if (ev.offsetY >= h - 58) {
+      usage.dispatchAction({ type: 'dataZoom', dataZoomIndex: 1, start: 0, end: 100 });
+    }
+  });
+  chartRef.usage = usage;
+  const lineEdgeClips = new WeakMap();
+  usage.on('rendered', () => clipLineToPlot(usage, lineEdgeClips));
+  clipLineToPlot(usage, lineEdgeClips);
+  rememberAxes(usage, 'usage', initialPowerAxis);
+  // ECharts 6.1 的圆角仅作用于边框；给缩略曲线/填充单独加圆角裁切，保留手柄光晕。
+  // 此处集中适配固定CDN版本的绘制结构；结构不匹配时不影响图表交互。
+  const shadowClips = new WeakMap();
+  const clipSliderShadow = () => {
+    const model = usage.getModel().getComponent('dataZoom', 1);
+    const view = model && usage.getViewOfComponentModel?.(model);
+    const groups = view?._displayables?.dataShadowSegs;
+    const size = view?._size;
+    if (!groups || !size || size[0] <= 2 || size[1] <= 2) return;
+    for (const group of groups) group.eachChild((child) => {
+      let saved = shadowClips.get(child);
+      if (!saved) {
+        saved = { clip: new echarts.graphic.Rect(), width: null, height: null };
+        shadowClips.set(child, saved);
+        child.setClipPath(saved.clip);
+      }
+      // 只在尺寸变化时标记重绘，避免rendered事件触发循环。
+      if (saved.width !== size[0] || saved.height !== size[1]) {
+        saved.width = size[0];
+        saved.height = size[1];
+        saved.clip.setShape({ x: 1, y: 1, width: size[0] - 2, height: size[1] - 2,
+          r: Math.min(17, (size[1] - 2) / 2) });
+      }
+    });
+  };
+  usage.on('rendered', clipSliderShadow);
+  clipSliderShadow();
+  const zoomTimes = document.getElementById('zoomTimes');
+  const updateZoomTimes = () => {
+    const ext = chartTimeExtent(usage);
+    if (!ext.every(Number.isFinite)) return;
+    document.getElementById('zoomFrom').textContent = fmtDateTime(fromChartTime(ext[0])).slice(5);
+    document.getElementById('zoomTo').textContent = fmtDateTime(fromChartTime(ext[1])).slice(5);
+  };
+  updateZoomTimes();
+  zoomTimes.style.visibility = 'visible';
+
+  usage.on('dataZoom', () => {
+    if (!syncing) scheduleChartUpdate('usage');
+  });
+
+  // 余额变化图
+  const balanceChanges = new Map(points.map((point, i) => {
+    const previous = points[i - 1];
+    const change = Number.isFinite(point.b) && Number.isFinite(previous?.b)
+      ? Math.round((point.b - previous.b) * 100) / 100 : null;
+    return [toChartTime(point.t), change];
+  }));
+  const balance = echarts.init(document.getElementById('chart-balance'));
+  const initialBalanceAxis = balanceAxisForRange(points, firstDataTime, lastDataTime);
+  balance.setOption({
+    useUTC: true,
+    backgroundColor: 'transparent',
+    grid: chartGrid(34, 26),
+    tooltip: {
+      ...tooltip,
+      formatter: (ps) => {
+        const p = ps[0];
+        if (!p) return '';
+        const change = balanceChanges.get(p.value[0]);
+        const changeText = change == null ? '—' : `${change > 0 ? '+' : ''}${change.toFixed(2)}`;
+        return fmtDateTime(fromChartTime(p.value[0])).slice(5)
+          + `<br/>余额 <b>${p.value[1] == null ? '—' : p.value[1].toFixed(2)}</b> 元`
+          + `<br/>变化 <b>${changeText}</b> 元`;
+      },
+    },
+    xAxis: timeAxis('balance'),
+    yAxis: { type: 'value', name: '元', nameGap: 12, nameTextStyle: { color: '#62789a', fontSize: 11 }, ...axis,
+      ...initialBalanceAxis,
+      axisLabel: { ...axis.axisLabel, margin: 4 } },
+    dataZoom: [insideZoom()],
+    series: [{
+      type: 'line',
+      data: points.filter(p => typeof p.b === 'number').map(p => [toChartTime(p.t), p.b]),
+      smooth: true, symbol: 'none',
+      lineStyle: { width: 2, color: '#34d399' },
+      areaStyle: {
+        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(52,211,153,.26)' },
+          { offset: 1, color: 'rgba(52,211,153,0)' },
+        ]),
+      },
+    }],
+  });
+
+  chartRef.balance = balance;
+  balance.on('rendered', () => clipLineToPlot(balance, lineEdgeClips));
+  clipLineToPlot(balance, lineEdgeClips);
+  rememberAxes(balance, 'balance', initialBalanceAxis);
+
+  balance.on('dataZoom', () => {
+    if (!syncing) scheduleChartUpdate('balance');
+  });
+
+  // 仅同步两图缩放范围，避免echarts.connect同时联动tooltip。
+  let syncing = false;
+  function syncZoom(from, to) {
+    const ext = chartTimeExtent(from);
+    if (!Number.isFinite(ext[0]) || !Number.isFinite(ext[1])) return;
+    const target = chartTimeExtent(to);
+    if (target[0] === ext[0] && target[1] === ext[1]) return;
+    syncing = true;
+    try {
+      to.dispatchAction({ type: 'dataZoom', startValue: ext[0], endValue: ext[1] });
+    } finally {
+      syncing = false;
+    }
+  }
+
+  // 合并同一帧的缩放和窗口变化事件
+  let pendingChart = null;
+  let pendingResize = false;
+  let frameId = null;
+  function scheduleChartUpdate(which, resize = false) {
+    if (which) pendingChart = which;
+    pendingResize ||= resize;
+    if (frameId === null) frameId = window.requestAnimationFrame(flushChartUpdate);
+  }
+  function flushChartUpdate() {
+    frameId = null;
+    if (pendingResize) {
+      pendingResize = false;
+      usage.resize();
+      balance.resize();
+    }
+    const source = pendingChart;
+    pendingChart = null;
+    if (source) syncZoom(chartRef[source], source === 'usage' ? balance : usage);
+    refreshDensity(usage, 'usage');
+    refreshDensity(balance, 'balance');
+    updateZoomTimes();
+  }
+  window.addEventListener('resize', () => scheduleChartUpdate(null, true));
+}
+
+main();
+</script>
+</body>
+</html>
