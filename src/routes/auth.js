@@ -24,7 +24,7 @@ export async function login(request, env) {
     return reply({ success: false, error: '请求格式不对' }, 400);
   }
 
-  const user = String(body?.user ?? body?.room ?? '').replace(/\s+/g, '');
+  const user = String(body?.user ?? '').replace(/\s+/g, '');
   const pw = String(body?.pw || '');
 
   if (!user || !pw) {

@@ -150,7 +150,7 @@ export async function exportData(request, env) {
 
   const serial = session.serial;
 
-  const latest = await first(env.DB, `SELECT ts FROM data WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`, [serial]);
+  const latest = await first(env.DB, `SELECT ts, room FROM data WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`, [serial]);
   if (!latest) return new Response('该表还没有数据', { status: 404 });
 
   const win = pickWindow(url.searchParams);
@@ -195,7 +195,7 @@ export async function exportData(request, env) {
   return new Response(body, {
     headers: {
       'content-type': 'text/plain; charset=utf-8',
-      'content-disposition': `attachment; filename="${encodeURIComponent(session.user)}_${win ? 'custom' : range}.txt"`,
+      'content-disposition': `attachment; filename="${encodeURIComponent(latest.room || serial)}_${win ? 'custom' : range}.txt"`,
       'cache-control': 'no-store',
     },
   });
