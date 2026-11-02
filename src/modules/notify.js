@@ -14,6 +14,7 @@ export async function sendWxHook(env, content, url) {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ msgtype: 'text', text: { content } }),
+      signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = await res.json().catch(() => ({}));

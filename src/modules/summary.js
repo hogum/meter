@@ -103,7 +103,8 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
     .map((r) => ({ t: r.t, d: r.d, w: r.w, b: r.b, k: r.k, occ: r.occ, kind: r.kind,
       gap: r.gap, heater_step: r.heater_step, burst_kwh: r.burst_kwh, burst_seconds: r.burst_seconds,
       bridged_idle: r.bridged_idle ?? false }));
-  const windowKwh = points.reduce((a, p) => a + (p.d ?? 0), 0);
+  // 首个点的增量始于查询范围之外，不计入区间用电。
+  const windowKwh = points.slice(1).reduce((sum, point) => sum + (point.d ?? 0), 0);
 
   const rangeDays = Math.max(span / 86400, 1 / 24);
   const avgDailyKwh = points.length ? Number((windowKwh / rangeDays).toFixed(2)) : null;

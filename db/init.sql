@@ -1,4 +1,4 @@
--- 与 src/db/schema.js 保持一致；改表结构时两处同步。
+-- 新数据库的完整建表结构。
 
 CREATE TABLE IF NOT EXISTS users (
      user      TEXT COLLATE NOCASE PRIMARY KEY NOT NULL,
