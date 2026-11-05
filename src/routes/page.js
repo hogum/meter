@@ -2,6 +2,7 @@ import { buildSummary, RANGE_SECONDS, DEFAULT_RANGE } from '../modules/summary.j
 import { all, first } from '../db/index.js';
 import { getSession } from '../lib/auth.js';
 import { successfulCollectionSql } from '../modules/collection-error.js';
+import { IMPORTED_JSON_PREFIX } from '../modules/history-import.js';
 
 const RANGE_OPTIONS = [
   ['24h', '近 24 小时'],
@@ -169,7 +170,7 @@ export async function exportData(request, env) {
   );
 
   // 一次读取该表的后半段版本，在内存匹配，避免对每条采样执行关联子查询。
-  const versions = rows.some(r => r.raw !== 'manual') ? await all(env.DB,
+  const versions = rows.some(r => r.raw !== 'manual' && !r.raw.startsWith(IMPORTED_JSON_PREFIX)) ? await all(env.DB,
     `SELECT last_online_time, tail FROM status WHERE serial_no = ?1 ORDER BY last_online_time`,
     [serial]) : [];
   let versionIndex = 0;
@@ -181,6 +182,7 @@ export async function exportData(request, env) {
         return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
       }).join(',');
     }
+    if (r.raw.startsWith(IMPORTED_JSON_PREFIX)) return r.raw.slice(IMPORTED_JSON_PREFIX.length);
     const time = r.sample_time;
     // 通常 time 与 ts 同序；异常旧数据时间倒序时重新定位，保持原 SQL 语义。
     if (time != null && previousTime != null && time < previousTime) versionIndex = 0;

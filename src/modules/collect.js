@@ -5,13 +5,15 @@ import { advanceStatus, checkNotifications } from './notify.js';
 import { first } from '../db/index.js';
 import { successfulCollectionSql } from './collection-error.js';
 
-const INSERT_DATA = `
-  INSERT INTO data (ts, serial_no, room, time, kwh, balance, ms, raw)
-  VALUES (?,?,?,?,?,?,?,?)
+export const UPSERT_SUCCESSFUL_DATA = `
   ON CONFLICT (serial_no, ts) DO UPDATE SET
     room=excluded.room, time=excluded.time, kwh=excluded.kwh, balance=excluded.balance,
     ms=excluded.ms, raw=excluded.raw
   WHERE NOT (${successfulCollectionSql('data')})
+`;
+const INSERT_DATA = `
+  INSERT INTO data (ts, serial_no, room, time, kwh, balance, ms, raw)
+  VALUES (?,?,?,?,?,?,?,?) ${UPSERT_SUCCESSFUL_DATA}
 `;
 const INSERT_FAILURE = `
   INSERT INTO data (ts, serial_no, room, time, kwh, balance, ms, raw)
@@ -111,7 +113,7 @@ export async function persistCollections(env, results, {
     if (head && statusTime <= head.last_online_time) continue;
     const previousBalance = env[`WH_${r.room}`]
       ? await first(env.DB, `SELECT balance FROM data WHERE serial_no = ?1
-          AND balance IS NOT NULL ORDER BY ts DESC LIMIT 1`, [p.serialNo]) : null;
+          AND ts < ?2 AND balance IS NOT NULL ORDER BY ts DESC LIMIT 1`, [p.serialNo, ts]) : null;
     const sample = { ts, kwh: typeof p.readNumber === 'number' ? p.readNumber : null,
       balance: typeof p.residualAmount === 'number' ? p.residualAmount : null };
     const { state, events } = advanceStatus(head, sample, previousBalance?.balance ?? null);

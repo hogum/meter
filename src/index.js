@@ -3,7 +3,7 @@ import { fail } from './lib/response.js';
 import { dashboard, exportData, recharge } from './routes/page.js';
 import { login, logout } from './routes/auth.js';
 import { runCollect } from './modules/collect.js';
-import { upload } from './routes/api.js';
+import { upload, uploadPage } from './routes/api.js';
 import { clean } from './routes/clean.js';
 
 const router = createRouter();
@@ -11,7 +11,8 @@ const router = createRouter();
 router.get('/', dashboard);
 router.get('/export', exportData);
 router.get('/recharge', recharge);
-router.get('/api', upload);
+router.get('/api', uploadPage);
+router.post('/api', upload);
 router.post('/login', login);
 router.post('/logout', logout);
 router.get('/clean', clean);
