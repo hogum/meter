@@ -9,7 +9,7 @@
 - 功率与余额曲线、预设或自定义区间统计、充值估算和余额预计可用时间。
 - 基于用电增量推测有人或无人，历史看板与实时通知分别处理。
 - 有人、无人、低余额及充值群通知，按房间配置接收地址。
-- 厂商手动上报、历史数据 TXT 导入和导出，以及手动历史数据清理。
+- 厂商手动上报、历史数据 TXT 和 JSONL 导入、TXT 导出，以及手动历史数据清理。
 
 有人状态属于启发式推测；余额预计可用时间和充值金额属于估算。当前没有开放注册、同比环比或峰谷分析，Webhook 失败不自动补发。
 
@@ -156,8 +156,8 @@ Worker 对 `SOURCE_URL` 发起 GET 请求，并通过查询参数 `SerialNo` 传
 | POST /login、POST /logout | 登录与退出 |
 | GET /export | 导出当前账号绑定电表的成功记录 |
 | GET /recharge | 登录后跳转到配置的充值页面 |
-| GET /api?act=up&tk=xxx | 打开 TXT 历史数据上传页 |
-| POST /api?act=up&tk=xxx | 提交实时读数或导入 TXT 历史数据 |
+| GET /api?act=up&tk=xxx | 打开历史数据上传页 |
+| POST /api?act=up&tk=xxx | 提交实时读数或导入 TXT、JSONL 历史数据 |
 | GET /clean | 登录后手动删除当前电表 90 天前的采样，保留账号及状态；无页面按钮，不自动执行 |
 
 GET 和 POST 都通过查询参数 `tk` 校验 `UPLOAD_TOKEN`。实时上报在 POST 表单中提交 `no`（表号）、`kwh`（累计读数）和 `balance`（余额）。可选的 `room` 必须与 `METERS` 映射匹配。服务端使用接收时间，跨秒重复请求由调用端控制。
@@ -166,6 +166,11 @@ GET 和 POST 都通过查询参数 `tk` 校验 `UPLOAD_TOKEN`。实时上报在 
 curl -d 'no=12345678&kwh=1234.56&balance=78.9' 'https://example.com/api?act=up&tk=xxx'
 ```
 
-历史导入使用上传页，也可直接用 `multipart/form-data` 提交 `file` 字段。文件为 `/export` 导出的 UTF-8 TXT（最大 16 MiB），支持厂商 JSON 和以 `manual` 开头的 CSV。导入保留原采样时间，同一电表同一时间的成功记录会跳过，失败记录可补齐。页面显示写入和跳过条数。导入静默补齐历史，实时状态和通知由后续采集或上报推进。
+历史导入使用上传页，也可直接用 `multipart/form-data` 提交 `file` 字段。文件使用 UTF-8 编码，最大 16 MiB。
+
+- TXT 可直接上传 `/export` 的导出文件，其中包含厂商 JSON 和以 `manual` 开头的 CSV。
+- JSONL 每行一个厂商成功响应对象，例如 `{"success":true,"response":{"serialNo":"12345678","lastOnlineTime":"2026-11-06 12:00:00","readNumber":1234.56,"residualAmount":78.9}}`。
+
+导入保留原采样时间，同一电表同一时间的成功记录会跳过，失败记录可补齐。页面显示写入和跳过条数。导入静默补齐历史，实时状态和通知由后续采集或上报推进。
 
 导出 TXT 包含厂商成功采样的 JSON 原文和手动上报的 CSV 记录。

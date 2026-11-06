@@ -25,8 +25,8 @@ const uploadHtml = `<!doctype html>
 <main>
   <h1>导入电表历史数据</h1>
   <form method="post" enctype="multipart/form-data">
-    <label for="file">选择导出的 TXT 文件（最大 ${MAX_FILE_MIB} MiB）</label>
-    <input id="file" name="file" type="file" accept=".txt,text/plain" required>
+    <label for="file">选择 TXT 或 JSONL 历史数据文件（最大 ${MAX_FILE_MIB} MiB）</label>
+    <input id="file" name="file" type="file" accept=".txt,.jsonl" required>
     <button>上传并导入</button>
   </form>
   <p id="result" role="status"></p>
@@ -103,7 +103,7 @@ export async function upload(request, env) {
 
 async function importFile(db, file, meters) {
   if (!(file instanceof File) || !file.size) {
-    return reply(400, { success: false, error: '请选择包含采样记录的 TXT 文件' });
+    return reply(400, { success: false, error: '请选择包含采样记录的 TXT 或 JSONL 文件' });
   }
   if (file.size > MAX_FILE_BYTES) return reply(413, { success: false, error: FILE_TOO_LARGE });
 
@@ -111,7 +111,7 @@ async function importFile(db, file, meters) {
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer());
   } catch {
-    return reply(400, { success: false, error: '文件须为 UTF-8 编码的 TXT' });
+    return reply(400, { success: false, error: '文件须使用 UTF-8 编码' });
   }
   let batches;
   try {
