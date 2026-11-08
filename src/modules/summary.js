@@ -1,9 +1,7 @@
-import { all, first } from '../db/index.js';
-import { UP_RUN, FLAT_RUN } from './occupancy.js';
+import { all, first, run } from '../db/index.js';
+import { BASE_SECONDS, computeOptimalBaseline, HEATER_BASE_STEP, parseBaseline } from './occupancy.js';
 import { successfulCollectionSql, readCollectionError } from './collection-error.js';
-import { analyzeHistory, historyIntervals, HISTORY_BASE_SECONDS, HISTORY_BASE_STEP,
-  HISTORY_CONTEXT_SECONDS, HISTORY_FLAT_SECONDS, HISTORY_BRIDGE_SECONDS, HEATING_LONG_MAX_SECONDS,
-  HEATING_LONG_MIN_WATTS, HEATING_QUIET_SECONDS, HEATING_MAX_SECONDS, HEATING_MIN_KWH } from './history-occupancy.js';
+import { analyzeHistory, historyIntervals, HISTORY_CONTEXT_SECONDS } from './history-occupancy.js';
 
 export const RANGE_SECONDS = {
   '6h': 6 * 3600,
@@ -21,16 +19,19 @@ const POWER_WINDOW_SECONDS = 1200;
 
 /** 用电量累计有效相邻增量；有人区间不跨越未知片段，末态取选中范围末次采样。 */
 export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, to } = {}) {
-  const latestEntry = await first(
-    env.DB,
-    `SELECT ts, time, kwh, balance, ms, raw, room FROM data
-      WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`,
-    [serial],
-  );
+  // 两条独立查询合并一次往返；latestStatus 只用于基线与实时状态。
+  const [latestEntry, latestStatus] = await Promise.all([
+    first(
+      env.DB,
+      `SELECT ts, time, kwh, balance, ms, raw, room FROM data
+        WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`,
+      [serial],
+    ),
+    first(env.DB,
+      `SELECT occupied, base_line FROM status WHERE serial_no = ?1 ORDER BY last_online_time DESC LIMIT 1`,
+      [serial]),
+  ]);
   if (!latestEntry) return null;
-  const latestStatus = await first(env.DB,
-    `SELECT occupied FROM status WHERE serial_no = ?1 ORDER BY last_online_time DESC LIMIT 1`,
-    [serial]);
   // 查询范围以最新采集为锚点；卡片在失败时保留上一次成功响应的数据。
   const latest = readCollectionError(latestEntry.raw, latestEntry.ms)
     ? await first(env.DB, `SELECT ts, time, kwh, balance, ms, raw, room FROM data
@@ -62,16 +63,41 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   // 两端各取上下文：历史可用后续数据识别加热和短暂停顿，但展示不超出区间。
   const fetchFrom = sinceTs - HISTORY_CONTEXT_SECONDS;
   const fetchUntil = Math.min(latestEntry.ts, untilTs + HISTORY_CONTEXT_SECONDS);
-  const rows = await all(
-    env.DB,
-    `SELECT ts, kwh, balance FROM data
-      WHERE serial_no = ?1 AND ts >= ?2 AND ts <= ?3
-        AND ${successfulCollectionSql()}
-      ORDER BY ts`,
-    [serial, fetchFrom, fetchUntil],
-  );
+  // 区间采样与最近 21 条互不依赖，合并成一次往返。
+  const [rows, rawRecent] = await Promise.all([
+    all(
+      env.DB,
+      `SELECT ts, kwh, balance FROM data
+        WHERE serial_no = ?1 AND ts >= ?2 AND ts <= ?3
+          AND ${successfulCollectionSql()}
+        ORDER BY ts`,
+      [serial, fetchFrom, fetchUntil],
+    ),
+    all(
+      env.DB,
+      `SELECT ts, kwh, balance, ms, raw FROM data
+        WHERE serial_no = ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT 21`,
+      [serial, untilTs],
+    ),
+  ]);
 
-  const recs = analyzeHistory(rows);
+  let baseLine = parseBaseline(latestStatus?.base_line).baseLine;
+  if (!custom && range === '7d' && rows.length >= 20) {
+    baseLine = computeOptimalBaseline(rows, baseLine);
+    if (latestStatus && latestStatus.base_line !== baseLine) {
+      try {
+        await run(env.DB,
+          `UPDATE status SET base_line = ?1 WHERE serial_no = ?2 AND last_online_time = (
+             SELECT MAX(last_online_time) FROM status WHERE serial_no = ?2
+           )`,
+          [baseLine, serial]);
+      } catch (e) {
+        console.error('更新 base_line 失败:', e.message);
+      }
+    }
+  }
+
+  const recs = analyzeHistory(rows, baseLine);
 
   // 曲线功率使用 20 分钟窗口；若相邻采样更稀疏，则直接计算该段平均功率。
   let pBase = 0;
@@ -101,8 +127,7 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   const points = recs
     .filter((r) => r.t >= sinceTs && r.t <= untilTs)
     .map((r) => ({ t: r.t, d: r.d, w: r.w, b: r.b, k: r.k, occ: r.occ, kind: r.kind,
-      gap: r.gap, heater_step: r.heater_step, burst_kwh: r.burst_kwh, burst_seconds: r.burst_seconds,
-      bridged_idle: r.bridged_idle ?? false }));
+      delta_level: r.delta_level, gap: r.gap, heater_step: r.heater_step }));
   // 首个点的增量始于查询范围之外，不计入区间用电。
   const windowKwh = points.slice(1).reduce((sum, point) => sum + (point.d ?? 0), 0);
 
@@ -130,14 +155,7 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
     ? Math.round((latest.balance / avgDailyCost) * 100) / 100
     : null;
 
-  // 额外取一条前置采样，用于计算最近 20 条记录的首个增量。
-  const rawRecent = await all(
-    env.DB,
-    `SELECT ts, kwh, balance, ms, raw FROM data
-      WHERE serial_no = ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT 21`,
-    [serial, untilTs],
-  );
-
+  // 逐条错误标记沿用最近 21 条原始记录。
   const asc = [...rawRecent].reverse();
   const recent = asc
     .map((r, i) => {
@@ -158,6 +176,8 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   for (let i = 1; i < asc.length; i++) gaps.push(asc[i].ts - asc[i - 1].ts);
   gaps.sort((a, b) => a - b);
   const sampleInterval = gaps.length ? gaps[Math.floor(gaps.length / 2)] : null;
+
+  const parsedBase = parseBaseline(baseLine);
 
   return {
     meter: {
@@ -191,12 +211,14 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
       recharge_count: rechargeCount,
       recharge_amount: Math.round(rechargeAmount),
       sample_interval: sampleInterval,
-      occupancy_rule: { mode: 'history', up_run: UP_RUN, flat_run: FLAT_RUN,
-        flat_seconds: HISTORY_FLAT_SECONDS,
-        bridge_seconds: HISTORY_BRIDGE_SECONDS, heating_long_max_seconds: HEATING_LONG_MAX_SECONDS,
-        heating_long_min_watts: HEATING_LONG_MIN_WATTS,
-        heater_step: HISTORY_BASE_STEP, base_seconds: HISTORY_BASE_SECONDS,
-        heating_quiet_seconds: HEATING_QUIET_SECONDS, heating_max_seconds: HEATING_MAX_SECONDS, heating_min_kwh: HEATING_MIN_KWH },
+      occupancy_rule: {
+        mode: 'baseline',
+        base_line: parsedBase.baseLine,
+        base_watts: parsedBase.baseW,
+        window_minutes: parsedBase.winMin,
+        heater_step: HEATER_BASE_STEP,
+        base_seconds: BASE_SECONDS,
+      },
       exhausted_at: (daysLeft && daysLeft > 0) ? latest.ts + Math.round(daysLeft * 86400) : null,
     },
     points,

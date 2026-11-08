@@ -22,9 +22,11 @@ CREATE TABLE IF NOT EXISTS status (
      serial_no        TEXT NOT NULL,
      last_online_time TEXT NOT NULL,
      occupied         INTEGER,
-     low_balance      INTEGER,
-     delta            REAL,
+     broke            INTEGER,
+     base_line        TEXT,
      last_kwh         REAL,
+     delta            INTEGER,
+     duration         INTEGER,
      tail             TEXT NOT NULL,
      PRIMARY KEY (serial_no, last_online_time)
    ) WITHOUT ROWID;

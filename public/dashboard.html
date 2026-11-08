@@ -1209,7 +1209,7 @@ function main() {
       </div>
       <div class="actions">
         <span class="pill ${status.occupied === null ? 'unknown' : status.occupied ? 'busy' : 'off'}"
-              title="最近一次采集保存的有人状态">
+              title="最近一次采集保存的有人状态${stats.occupancy_rule?.base_line ? `（基线 ${escapeHtml(stats.occupancy_rule.base_line)}）` : ''}">
           <i class="dot"></i><span>${status.occupied === null ? '未知' : status.occupied ? '有人' : '无人'}</span>
         </span>
         ${meter.valve ? `<span class="pill ${meter.valve.code === 0 ? 'open' : meter.valve.code === 1 ? 'cut' : ''}">
@@ -1250,7 +1250,7 @@ function main() {
       <div class="panel-head">
         <div>
           <h2>用电功率</h2>
-          <span class="hint">区间用电 ${fmt(stats.window_kwh)} kWh · 有人时长 ${stats.window_hours} 小时</span>
+          <span class="hint">区间用电 ${fmt(stats.window_kwh)} kWh · 有人时长 ${stats.window_hours} 小时${stats.occupancy_rule?.base_line ? ` · 基线 ${escapeHtml(stats.occupancy_rule.base_line)}` : ''}</span>
         </div>
         <div class="ranges">${rangeLinks}</div>
       </div>
@@ -1559,12 +1559,15 @@ function main() {
         const kwh = point?.d;
         const watts = Number.isFinite(kwh) && point?.gap > 0
           ? Math.round(kwh / point.gap * 3600000) : null;
-        const special = point?.kind === 'heater_burst'
+        const rule = stats.occupancy_rule;
+        const special = point?.kind === 'heater_burst' && Number.isFinite(point.burst_seconds) && Number.isFinite(point.burst_kwh)
           ? `近 ${Math.round(point.burst_seconds / 60)} 分钟用电 ${point.burst_kwh.toFixed(2)} 度，疑似热水器`
           : point?.kind === 'heater'
-            ? `用电超过 ${stats.occupancy_rule?.heater_step ?? 0.1} 度/${Math.round((stats.occupancy_rule?.base_seconds ?? 182) / 60)} 分钟，疑似热水器`
-          : point?.bridged_idle && kwh === 0
-            ? '短时 0 消耗，保持判定'
+            ? `用电达到 ${point.heater_step ?? rule?.heater_step ?? 0.09} 度/${Math.max(1, Math.round((point.gap ?? rule?.base_seconds ?? 182) / 60))} 分钟，疑似热水器`
+          : point?.occ === 1 && point?.kind === 'up'
+            ? `高于基线（${escapeHtml(rule?.base_line ?? '12w/15m')}），判定有人`
+          : point?.occ === 1 && kwh === 0
+            ? '窗口内 0 消耗，保持有人判定'
           : '';
         return fmtDateTime(fromChartTime(p.value[0])).slice(5)
           + `<br/>用电 <b>${kwh == null ? '—' : kwh.toFixed(2)}</b> 度`

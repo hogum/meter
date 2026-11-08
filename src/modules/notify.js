@@ -1,5 +1,6 @@
-/** 通知判断只依赖最新 status 和本轮采样，不保留历史窗口。 */
-import { HEATER_STEP, MAX_GAP_SECONDS } from './occupancy.js';
+/** 通知判断复用统一状态机，余额回查仅在配置了群机器人时按需执行。 */
+import { BASE_SECONDS, DEFAULT_BASE_LINE, stepOccupancy } from './occupancy.js';
+import { toEpoch } from './collector.js';
 
 export const LOW_BALANCE = 2;
 
@@ -26,52 +27,48 @@ export async function sendWxHook(env, content, url) {
   }
 }
 
-/** delta 是紧邻上一采样间隔的有效增量；超阈值、回退和无效数据打断连续判断。 */
+/**
+ * 根据上一状态（含 last_kwh）和本轮采样推进状态并生成通知事件。
+ *
+ * @param {{last_online_time: string, occupied?: number|null, broke?: number|null, base_line?: string|null, last_kwh?: number|null, delta?: number|null, duration?: number|null}|null} previous
+ * @param {{ts: number, kwh: number|null, balance: number|null}} sample
+ * @param {number|null} previousBalance 最近一次有效余额
+ */
 export function advanceStatus(previous, sample, previousBalance = null) {
+  const prevTs = previous ? toEpoch(previous.last_online_time) : null;
+  const gap = prevTs != null ? sample.ts - prevTs : null;
+  const d = (previous && Number.isFinite(sample.kwh) && Number.isFinite(previous.last_kwh))
+    ? Number((sample.kwh - previous.last_kwh).toFixed(3))
+    : null;
+
+  const next = stepOccupancy(previous, { d, gap });
   const state = {
-    occupied: previous?.occupied ?? 0,
-    low_balance: previous?.low_balance ?? 0,
-    delta: previous?.delta ?? null,
+    occupied: next.occupied,
+    broke: previous?.broke ?? 0,
+    base_line: next.base_line || previous?.base_line || DEFAULT_BASE_LINE,
     last_kwh: sample.kwh,
+    delta: next.delta,
+    duration: next.duration,
   };
-  // 持久化增量可能来自旧阈值，超出当前阈值时重新建立连续依据。
-  if (state.delta > HEATER_STEP) state.delta = null;
-  const gap = previous
-    ? sample.ts - Date.parse(previous.last_online_time.replace(' ', 'T') + '+08:00') / 1000 : null;
-  if (previous) {
-    if (gap <= 0 || gap > MAX_GAP_SECONDS || !Number.isFinite(sample.kwh) || !Number.isFinite(previous.last_kwh)) {
-      // 无法组成有效相邻采样，重建基线，不凭空改变有人状态。
-      state.delta = null;
-    } else {
-      const d = Number((sample.kwh - previous.last_kwh).toFixed(3));
-      if (d >= 0 && d <= HEATER_STEP) {
-        if (d === 0 && state.delta === 0) state.occupied = 0;
-        if (d > 0 && state.delta > 0) state.occupied = 1;
-        state.delta = d;
-      } else {
-        state.delta = null;
-      }
-    }
-  }
+
   const events = [];
   if (sample.balance != null) {
     const rise = previousBalance == null ? 0 : sample.balance - previousBalance;
     if (rise > 1) {
       events.push(`【充值】余额增加${Math.round(rise)}元，当前余额${sample.balance.toFixed(2)}元`);
     }
-    state.low_balance = sample.balance < LOW_BALANCE ? 1 : 0;
-    if (state.low_balance && !previous?.low_balance) {
+    state.broke = sample.balance < LOW_BALANCE ? 1 : 0;
+    if (state.broke && !previous?.broke) {
       events.push(`【预警】余额仅剩${sample.balance.toFixed(2)}元，请及时充值`);
     }
   }
   if (previous?.occupied != null && state.occupied !== previous.occupied) {
+    const balance = sample.balance == null ? '未知' : `${sample.balance.toFixed(2)}元`;
     if (state.occupied) {
-      const minutes = Math.max(1, Math.round(gap / 60));
-      const used = (sample.kwh - previous.last_kwh).toFixed(2);
-      const balance = sample.balance == null ? '未知' : `${sample.balance.toFixed(2)}元`;
+      const minutes = Math.max(1, Math.round((gap ?? BASE_SECONDS) / 60));
+      const used = d != null && d >= 0 ? d.toFixed(2) : '0.01';
       events.push(`【有人】近${minutes}分钟用电${used}度，当前余额${balance}`);
     } else {
-      const balance = sample.balance == null ? '未知' : `${sample.balance.toFixed(2)}元`;
       events.push(`【无人】当前余额${balance}`);
     }
   }
