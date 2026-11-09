@@ -14,16 +14,16 @@ export function toEpoch(timeText) {
 
 /**
  * 拉取设备详情，网络、超时、HTTP和响应异常按配置重试。
- * 成功须有有效lastOnlineTime，最终失败交上层落库，attemptsLog保留逐次耗时和错误。
+ * 可只执行首轮，或携带首轮日志继续剩余重试。
  */
-export async function fetchDevice(serial, deviceApiUrl) {
+export async function fetchDevice(serial, deviceApiUrl, { firstOnly = false, attemptsLog: previous = [] } = {}) {
   const url = new URL(deviceApiUrl);
   url.searchParams.set('SerialNo', serial);
-  const attemptsLog = [];
-  let lastError = null;
-  let lastFailure = null;
+  const attemptsLog = [...previous];
+  const limit = firstOnly ? 1 : RETRY_DELAYS_MS.length;
+  let lastFailure;
 
-  for (let i = 0; i < RETRY_DELAYS_MS.length; i++) {
+  for (let i = attemptsLog.length; i < limit; i++) {
     if (RETRY_DELAYS_MS[i] > 0) await sleep(RETRY_DELAYS_MS[i]);
     const started = Date.now();
     let signal;
@@ -53,25 +53,37 @@ export async function fetchDevice(serial, deviceApiUrl) {
         throw new Error(`返回不是 JSON: ${text.slice(0, 80)}`);
       }
 
-      if (!body.success || !body.response) {
-        throw new Error(body.msg || '接口 success=false');
+      if (!body?.success || !body.response) {
+        throw new Error(body?.msg || '接口 success=false');
       }
-      if (toEpoch(body.response.lastOnlineTime) == null) {
+      const payload = body.response;
+      if (String(payload.serialNo ?? '') !== serial) {
+        throw new Error('响应 serialNo 与请求表号不一致');
+      }
+      const reading = payload.readNumber;
+      if (typeof reading !== 'number' || !Number.isFinite(reading) || reading < 0) {
+        throw new Error('readNumber 须为有限非负数');
+      }
+      const ts = toEpoch(payload.lastOnlineTime);
+      if (ts == null) {
         throw new Error('缺少有效的 lastOnlineTime');
       }
+      if (ts > Math.floor(Date.now() / 1000) + 300) {
+        throw new Error('lastOnlineTime 超前当前时间超过 300 秒');
+      }
 
-      attemptsLog.push({ attempt: i + 1, ms: Date.now() - started, ok: true });
+      const ms = Date.now() - started;
+      attemptsLog.push({ attempt: i + 1, ms, ok: true });
       return {
         ok: true,
-        payload: body.response,
+        payload,
         raw: text,                            // 原始响应原文，用于原样截取后半段
         httpStatus: res.status,
         attempts: i + 1,
-        durationMs: Date.now() - started,
+        durationMs: ms,
         attemptsLog,
       };
     } catch (e) {
-      lastError = e;
       const timedOut = e?.name === 'TimeoutError'
         || (signal?.aborted && signal.reason?.name === 'TimeoutError');
       lastFailure = {
@@ -89,8 +101,8 @@ export async function fetchDevice(serial, deviceApiUrl) {
 
   return {
     ok: false,
-    error: `${lastError?.name || 'Error'}: ${lastError?.message || lastError}`,
-    attempts: RETRY_DELAYS_MS.length,
+    error: attemptsLog.at(-1).error,
+    attempts: attemptsLog.length,
     attemptsLog,
     // 8秒超时的约定标记；9999表示超时，不是9.999秒的实际耗时。
     durationMs: lastFailure?.type === 'timeout' ? COLLECTION_TIMEOUT_MS : attemptsLog.at(-1)?.ms ?? null,

@@ -75,9 +75,13 @@ export function advanceStatus(previous, sample, previousBalance = null) {
   return { state, events };
 }
 
-/** 状态已随采样事务提交；推送失败不回滚，避免重复补发。 */
+/** 状态已随采样事务提交；推送失败不回滚，避免重复补发。多个事件独立推送，不拼接。 */
 export async function checkNotifications(env, serial, room, events) {
   const url = env[`WH_${room}`];
   if (!url || events.length === 0) return { events, pushed: false };
-  return { events, pushed: await sendWxHook(env, events.join('；'), url) };
+  let pushed = true;
+  for (const content of events) {
+    if (!await sendWxHook(env, content, url)) pushed = false;
+  }
+  return { events, pushed };
 }

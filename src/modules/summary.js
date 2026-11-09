@@ -1,4 +1,4 @@
-import { all, first, run } from '../db/index.js';
+import { first, run } from '../db/index.js';
 import { BASE_SECONDS, computeOptimalBaseline, HEATER_BASE_STEP, parseBaseline } from './occupancy.js';
 import { successfulCollectionSql, readCollectionError } from './collection-error.js';
 import { analyzeHistory, historyIntervals, HISTORY_CONTEXT_SECONDS } from './history-occupancy.js';
@@ -16,38 +16,23 @@ export const DEFAULT_RANGE = '24h';
 
 // 20 分钟窗口缓解电表量化噪声，仅平滑曲线，不参与有人判断。
 const POWER_WINDOW_SECONDS = 1200;
+const DATA_ENTRY = 'ts, time, kwh, balance, ms, raw, room';
+const LATEST_STATUS = `SELECT last_online_time, occupied, base_line FROM status
+  WHERE serial_no = ?1 ORDER BY last_online_time DESC LIMIT 1`;
+const UPDATE_BASE_LINE = `UPDATE status SET base_line = ?1
+  WHERE serial_no = ?2 AND last_online_time = ?3 AND base_line IS ?4
+    AND last_online_time = (SELECT last_online_time FROM status
+      WHERE serial_no = ?2 ORDER BY last_online_time DESC LIMIT 1)`;
 
 /** 用电量累计有效相邻增量；有人区间不跨越未知片段，末态取选中范围末次采样。 */
 export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, to } = {}) {
   // 两条独立查询合并一次往返；latestStatus 只用于基线与实时状态。
-  const [latestEntry, latestStatus] = await Promise.all([
-    first(
-      env.DB,
-      `SELECT ts, time, kwh, balance, ms, raw, room FROM data
-        WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`,
-      [serial],
-    ),
-    first(env.DB,
-      `SELECT occupied, base_line FROM status WHERE serial_no = ?1 ORDER BY last_online_time DESC LIMIT 1`,
-      [serial]),
+  const [{ results: [latestEntry] }, { results: [latestStatus] }] = await env.DB.batch([
+    env.DB.prepare(`SELECT ${DATA_ENTRY} FROM data
+      WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`).bind(serial),
+    env.DB.prepare(LATEST_STATUS).bind(serial),
   ]);
   if (!latestEntry) return null;
-  // 查询范围以最新采集为锚点；卡片在失败时保留上一次成功响应的数据。
-  const latest = readCollectionError(latestEntry.raw, latestEntry.ms)
-    ? await first(env.DB, `SELECT ts, time, kwh, balance, ms, raw, room FROM data
-        WHERE serial_no = ?1 AND ${successfulCollectionSql()}
-        ORDER BY ts DESC LIMIT 1`, [serial]) ?? latestEntry
-    : latestEntry;
-
-  // 阀门状态从最近一次成功厂商响应提取。
-  const valveCode = (() => {
-    const m = /"valveState":(\d+)/.exec(latest.raw || '');
-    return m ? Number(m[1]) : null;
-  })();
-  const valveName = (() => {
-    const m = /"valveStateName":"([^"]*)"/.exec(latest.raw || '');
-    return m ? m[1] : null;
-  })();
 
   // 区间：传了 from/to 就用自定义（Unix 秒），否则按预设范围从最新采样往回推。
   // 仅在截断后仍有有效区间时截到最新采样，避免导出把倒置或等长边界当成默认范围。
@@ -63,34 +48,68 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   // 两端各取上下文：历史可用后续数据识别加热和短暂停顿，但展示不超出区间。
   const fetchFrom = sinceTs - HISTORY_CONTEXT_SECONDS;
   const fetchUntil = Math.min(latestEntry.ts, untilTs + HISTORY_CONTEXT_SECONDS);
-  // 区间采样与最近 21 条互不依赖，合并成一次往返。
-  const [rows, rawRecent] = await Promise.all([
-    all(
-      env.DB,
-      `SELECT ts, kwh, balance FROM data
-        WHERE serial_no = ?1 AND ts >= ?2 AND ts <= ?3
-          AND ${successfulCollectionSql()}
-        ORDER BY ts`,
-      [serial, fetchFrom, fetchUntil],
-    ),
-    all(
-      env.DB,
-      `SELECT ts, kwh, balance, ms, raw FROM data
-        WHERE serial_no = ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT 21`,
-      [serial, untilTs],
-    ),
-  ]);
+
+  const latestIsError = Boolean(readCollectionError(latestEntry.raw, latestEntry.ms));
+
+  // 区间采样、最近 21 条互不依赖，合并成一次往返；若最新一条失败且展示区在过去，仅补扫 (fetchUntil, latestEntry.ts) 避免重扫 rows。
+  const queries = [
+    env.DB.prepare(`SELECT ts, kwh, balance FROM data
+      WHERE serial_no = ?1 AND ts >= ?2 AND ts <= ?3
+        AND ${successfulCollectionSql()}
+      ORDER BY ts`).bind(serial, fetchFrom, fetchUntil),
+    env.DB.prepare(`SELECT ts, kwh, balance, ms,
+        CASE WHEN ${successfulCollectionSql()} THEN '' ELSE raw END AS raw
+      FROM data WHERE serial_no = ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT 21`).bind(serial, untilTs),
+  ];
+  if (latestIsError && fetchUntil < latestEntry.ts) {
+    queries.push(env.DB.prepare(`SELECT ${DATA_ENTRY} FROM data
+      WHERE serial_no = ?1 AND ts > ?2 AND ts < ?3 AND ${successfulCollectionSql()}
+      ORDER BY ts DESC LIMIT 1`).bind(serial, fetchUntil, latestEntry.ts));
+  }
+  const [{ results: rows }, { results: rawRecent }, tail] = await env.DB.batch(queries);
+  const tailLatest = tail?.results[0];
+
+  // 最新一行失败时，优先复用刚查完的 rows 末尾主键点查，避免同一批失败记录被扫描两遍。
+  let latest = latestEntry;
+  if (latestIsError) {
+    if (tailLatest) {
+      latest = tailLatest;
+    } else {
+      const lastInRange = rows.at(-1);
+      const fallback = lastInRange
+        ? env.DB.prepare(`SELECT ${DATA_ENTRY} FROM data WHERE serial_no = ?1 AND ts = ?2`)
+          .bind(serial, lastInRange.ts)
+        : env.DB.prepare(`SELECT ${DATA_ENTRY} FROM data
+          WHERE serial_no = ?1 AND ts < MIN(?2, ?3) AND ${successfulCollectionSql()}
+          ORDER BY ts DESC LIMIT 1`).bind(serial, fetchFrom, latestEntry.ts);
+      latest = (await fallback.first()) ?? latestEntry;
+    }
+  }
+
+  // 阀门状态从最近一次成功厂商响应提取。
+  const valveCode = (() => {
+    const m = /"valveState":(\d+)/.exec(latest.raw || '');
+    return m ? Number(m[1]) : null;
+  })();
+  const valveName = (() => {
+    const m = /"valveStateName":"([^"]*)"/.exec(latest.raw || '');
+    return m ? m[1] : null;
+  })();
 
   let baseLine = parseBaseline(latestStatus?.base_line).baseLine;
   if (!custom && range === '7d' && rows.length >= 20) {
     baseLine = computeOptimalBaseline(rows, baseLine);
     if (latestStatus && latestStatus.base_line !== baseLine) {
       try {
-        await run(env.DB,
-          `UPDATE status SET base_line = ?1 WHERE serial_no = ?2 AND last_online_time = (
-             SELECT MAX(last_online_time) FROM status WHERE serial_no = ?2
-           )`,
-          [baseLine, serial]);
+        const result = await run(env.DB, UPDATE_BASE_LINE,
+          [baseLine, serial, latestStatus.last_online_time, latestStatus.base_line]);
+        if (result.meta?.changes === 0) {
+          const head = await first(env.DB, LATEST_STATUS, [serial]);
+          if (head && head.last_online_time !== latestStatus.last_online_time
+              && head.base_line === latestStatus.base_line) {
+            await run(env.DB, UPDATE_BASE_LINE, [baseLine, serial, head.last_online_time, head.base_line]);
+          }
+        }
       } catch (e) {
         console.error('更新 base_line 失败:', e.message);
       }

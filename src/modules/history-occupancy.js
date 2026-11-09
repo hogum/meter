@@ -1,6 +1,5 @@
 /** 历史看板：复用统一状态机与 base_line 判定有人/无人区间。 */
 import {
-  BASE_SECONDS,
   DEFAULT_BASE_LINE,
   heaterStep,
   parseBaseline,
@@ -97,12 +96,12 @@ export function analyzeHistory(rows, baseLine = DEFAULT_BASE_LINE) {
       while (
         lastActive >= 1 &&
         !points[lastActive].break_before &&
-        points[lastActive].delta_level !== 1 &&
+        points[lastActive].delta_level === 0 &&
         points[lastActive].occ === 1
       ) {
         lastActive--;
       }
-      const cutoffTs = points[lastActive]?.delta_level === 1
+      const cutoffTs = points[lastActive]?.delta_level > 0
         ? points[lastActive].t + TAIL_HOLD_SECONDS
         : 0;
       for (let j = i - 1; j > lastActive && points[j].t > cutoffTs; j--) {
