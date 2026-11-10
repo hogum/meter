@@ -1,7 +1,7 @@
-import { UPSERT_SUCCESSFUL_DATA } from './collect.js';
+import { extractEnd, extractFront, IMPORTED_JSON_PREFIX, UPSERT_SUCCESSFUL_DATA } from './collect.js';
 import { toEpoch } from './collector.js';
 
-export const IMPORTED_JSON_PREFIX = 'import: ';
+export { IMPORTED_JSON_PREFIX } from './collect.js';
 
 // 用绑定参数构造 VALUES，避免 D1 将文件中的输入记录计为读取行。
 const INSERT_HISTORY = `
@@ -71,6 +71,8 @@ export function prepareHistoryImport(text, meters) {
   const csvField = /"([^"]*(?:""[^"]*)*)"|[^",\r\n]*/y;
   const separator = /[ \t]*(?:\r\n|[\r\n]|$)/y;
   const batches = [];
+  const seen = new Set();
+  let duplicates = 0;
   let records = [];
   let bytes = 0;
   let offset = 0;
@@ -122,6 +124,12 @@ export function prepareHistoryImport(text, meters) {
       const record = [ts, serial, typeof room === 'string' ? room : null, time, kwh, balance, raw];
       const size = encoder.encode(JSON.stringify(record)).byteLength + 1;
       if (size > MAX_RECORD_BYTES) throw new Error('单条记录过大');
+      const key = `${serial}:${ts}`;
+      if (seen.has(key)) {
+        duplicates++;
+        continue;
+      }
+      seen.add(key);
       if (records.length && bytes + size > BATCH_BYTES) flush();
       records.push(record);
       bytes += size;
@@ -132,17 +140,54 @@ export function prepareHistoryImport(text, meters) {
   }
   if (records.length) flush();
   if (!batches.length) throw new Error('文件没有采样记录');
-  return batches;
+  return { batches, duplicates };
 }
 
-export async function writeHistory(db, batches) {
+function findTail(versions, time) {
+  let low = 0;
+  let high = versions.length;
+  while (low < high) {
+    const mid = (low + high) >> 1;
+    if (versions[mid].last_online_time < time) low = mid + 1;
+    else high = mid;
+  }
+  return versions[low]?.tail ?? null;
+}
+
+async function loadStatusVersions(db, batches) {
+  const serials = [...new Set(
+    batches.flat().filter((r) => r[6].startsWith(IMPORTED_JSON_PREFIX)).map((r) => r[1]),
+  )];
+  if (!serials.length) return new Map();
+  const results = await db.batch(
+    serials.map((serial) => db.prepare(
+      'SELECT last_online_time, tail FROM status WHERE serial_no = ?1 ORDER BY last_online_time',
+    ).bind(serial)),
+  );
+  return new Map(serials.map((serial, i) => [serial, results[i]?.results ?? []]));
+}
+
+function compactRaw(record, versionsBySerial) {
+  const raw = record[6];
+  if (!raw.startsWith(IMPORTED_JSON_PREFIX)) return record;
+  const versions = versionsBySerial.get(record[1]);
+  if (!versions?.length) return record;
+  const original = raw.slice(IMPORTED_JSON_PREFIX.length);
+  const endText = extractEnd(original);
+  if (!endText || findTail(versions, record[3]) !== endText) return record;
+  return [record[0], record[1], record[2], record[3], record[4], record[5], extractFront(original)];
+}
+
+export async function writeHistory(db, { batches, duplicates }) {
   let written = 0;
-  let skipped = 0;
+  let skipped = duplicates;
   try {
+    const versionsBySerial = await loadStatusVersions(db, batches);
     for (const records of batches) {
       const statements = [];
       for (let offset = 0; offset < records.length; offset += ROWS_PER_STATEMENT) {
-        const rows = records.slice(offset, offset + ROWS_PER_STATEMENT);
+        const rows = records.slice(offset, offset + ROWS_PER_STATEMENT)
+          .map((record) => compactRaw(record, versionsBySerial));
         const placeholders = rows.map(() => '(?,?,?,?,?,?,NULL,?)').join(',');
         const sql = INSERT_HISTORY + placeholders + UPSERT_SUCCESSFUL_DATA;
         statements.push(db.prepare(sql).bind(...rows.flat()));

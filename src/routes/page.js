@@ -190,7 +190,7 @@ export async function exportData(request, env) {
       while (versionIndex < versions.length && versions[versionIndex].last_online_time < time) versionIndex++;
       previousTime = time;
     }
-    const tail = time == null ? '' : versions[versionIndex]?.tail;
+    const tail = time == null ? '' : (versions[versionIndex] ?? versions.at(-1))?.tail;
     return (r.raw || '') + (tail || '');
   }).join('\n');
 

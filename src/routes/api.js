@@ -113,13 +113,13 @@ async function importFile(db, file, meters) {
   } catch {
     return reply(400, { success: false, error: '文件须使用 UTF-8 编码' });
   }
-  let batches;
+  let plan;
   try {
-    batches = prepareHistoryImport(text, meters);
+    plan = prepareHistoryImport(text, meters);
   } catch (error) {
     return reply(400, { success: false, error: error.message });
   }
-  const result = await writeHistory(db, batches);
+  const result = await writeHistory(db, plan);
   return reply(result.success ? 200 : 500, result);
 }
 
