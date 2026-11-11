@@ -155,16 +155,28 @@ function findTail(versions, time) {
 }
 
 async function loadStatusVersions(db, batches) {
-  const serials = [...new Set(
-    batches.flat().filter((r) => r[6].startsWith(IMPORTED_JSON_PREFIX)).map((r) => r[1]),
-  )];
-  if (!serials.length) return new Map();
-  const results = await db.batch(
-    serials.map((serial) => db.prepare(
-      'SELECT last_online_time, tail FROM status WHERE serial_no = ?1 ORDER BY last_online_time',
-    ).bind(serial)),
-  );
-  return new Map(serials.map((serial, i) => [serial, results[i]?.results ?? []]));
+  const ranges = new Map();
+  for (const batch of batches) {
+    for (const [, serial, , time, , , raw] of batch) {
+      if (!raw.startsWith(IMPORTED_JSON_PREFIX)) continue;
+      const range = ranges.get(serial);
+      if (!range) ranges.set(serial, { from: time, to: time });
+      else if (time < range.from) range.from = time;
+      else if (time > range.to) range.to = time;
+    }
+  }
+  if (!ranges.size) return new Map();
+  const serials = [...ranges.keys()];
+  const results = await db.batch(serials.map(serial => {
+    const { from, to } = ranges.get(serial);
+    return db.prepare(`SELECT last_online_time, tail FROM status
+      WHERE serial_no = ?1 AND last_online_time BETWEEN ?2 AND ?3
+      UNION ALL SELECT * FROM (
+        SELECT last_online_time, tail FROM status WHERE serial_no = ?1 AND last_online_time > ?3
+        ORDER BY last_online_time LIMIT 1
+      ) ORDER BY last_online_time`).bind(serial, from, to);
+  }));
+  return new Map(serials.map((serial, i) => [serial, results[i].results]));
 }
 
 function compactRaw(record, versionsBySerial) {

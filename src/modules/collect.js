@@ -2,7 +2,6 @@ import { getMeters } from '../config.js';
 import { fetchDevice, toEpoch } from './collector.js';
 export { toEpoch } from './collector.js';
 import { advanceStatus, checkNotifications } from './notify.js';
-import { first } from '../db/index.js';
 import { successfulCollectionSql } from './collection-error.js';
 
 export const IMPORTED_JSON_PREFIX = 'import: ';
@@ -84,36 +83,37 @@ export async function runCollect(env, { source = 'cron' } = {}) {
   const batchId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`;
 
   const batch = { startedAt, batchId, source };
-  const firstResults = await Promise.all(meters.map(async (meter) => ({
-    ...meter, ...await fetchDevice(meter.serial, deviceApiUrl, { firstOnly: true }),
-  })));
-  const failed = firstResults.filter((r) => !r.ok);
-  if (!failed.length) return persistCollections(env, firstResults, batch);
+  // 同一轮事件循环内完成的电表共用一个提交批次，后续结果独立提交。
+  let pending = [];
+  let submitting;
+  function enqueue(reading) {
+    if (!pending.length) {
+      submitting = new Promise(resolve => setTimeout(resolve, 0)).then(() => {
+        const ready = pending;
+        pending = [];
+        return persistCollections(env, ready, batch);
+      });
+    }
+    pending.push(reading);
+    return submitting;
+  }
 
-  const ready = firstResults.filter((r) => r.ok);
-  const firstBatch = ready.length ? persistCollections(env, ready, batch) : null;
-  const retryBatch = Promise.all(failed.map(async ({ serial, room, attemptsLog }) => ({
-    serial, room, ...await fetchDevice(serial, deviceApiUrl, { attemptsLog }),
-  }))).then((results) => persistCollections(env, results, batch));
-  const [early, late] = await Promise.all([firstBatch, retryBatch]);
-  if (!early) return late;
-
-  const insertError = early.insert_error ?? late.insert_error;
-  const detailBySerial = new Map([...early.detail, ...late.detail].map((d) => [d.serial, d]));
-  return {
-    ...early,
-    meters_total: meters.length,
-    meters_ok: early.meters_ok + late.meters_ok,
-    meters_fail: early.meters_fail + late.meters_fail,
-    attempted: early.attempted + late.attempted,
-    inserted: early.inserted + late.inserted,
-    duplicated: insertError ? 0 : early.duplicated + late.duplicated,
-    failed_inserted: early.failed_inserted + late.failed_inserted,
-    end_changed: early.end_changed + late.end_changed,
-    insert_error: insertError,
-    duration_ms: Date.now() - startedAt,
-    detail: meters.map(({ serial }) => detailBySerial.get(serial)),
-  };
+  const perMeter = await Promise.all(meters.map(async meter => {
+    const result = await fetchDevice(meter.serial, deviceApiUrl);
+    return enqueue({ ...meter, ...result });
+  }));
+  const reports = [...new Set(perMeter)];
+  const combined = { ...reports[0] };
+  for (const field of ['meters_total', 'meters_ok', 'meters_fail', 'attempted', 'inserted',
+    'duplicated', 'failed_inserted', 'end_changed']) {
+    combined[field] = reports.reduce((sum, report) => sum + report[field], 0);
+  }
+  combined.insert_error = reports.find(report => report.insert_error)?.insert_error ?? null;
+  if (combined.insert_error) combined.duplicated = 0;
+  const detail = new Map(reports.flatMap(report => report.detail).map(item => [item.serial, item]));
+  combined.detail = meters.map(meter => detail.get(meter.serial));
+  combined.duration_ms = Date.now() - startedAt;
+  return combined;
 }
 
 /** 返回 null 表示状态已处理或超越这一时刻。 */
@@ -149,12 +149,13 @@ function describeCollection(reading, head) {
 }
 
 /** 只在有电表需要充值判断时，批量查询各表上次有效余额。 */
-async function loadPreviousBalances(env, descs) {
+async function loadPreviousBalances(env, descs, record) {
   const targets = descs.filter((d) => d.sample.balance != null && env[`WH_${d.reading.room}`]);
   if (!targets.length) return descs.map(() => null);
   const results = await env.DB.batch(
     targets.map((d) => env.DB.prepare(PREVIOUS_BALANCE).bind(d.serial, d.ts)),
   );
+  results.forEach(record);
   const balanceOf = new Map(targets.map((d, i) => [d, results[i]?.results?.[0]?.balance ?? null]));
   return descs.map((d) => balanceOf.get(d) ?? null);
 }
@@ -185,13 +186,18 @@ function buildStatements(env, desc, previousBalance) {
 }
 
 /** 重新核对头快照；同刻已有成功记录时，以已入库的读数补写状态。 */
-async function retryCollection(env, reading) {
+async function retryCollection(env, reading, record) {
+  async function first(sql, params) {
+    const result = await env.DB.prepare(sql).bind(...params).all();
+    record(result);
+    return result.results[0] ?? null;
+  }
   for (let attempt = 0; attempt < 3; attempt++) {
-    const head = await first(env.DB, HEAD_STATUS, [reading.serial]);
+    const head = await first(HEAD_STATUS, [reading.serial]);
     const desc = describeCollection(reading, head);
     if (!desc) return null;
 
-    const existing = await first(env.DB, `SELECT kwh, balance, raw ${existingSample('?2')}`, [desc.serial, desc.ts]);
+    const existing = await first(`SELECT kwh, balance, raw ${existingSample('?2')}`, [desc.serial, desc.ts]);
     if (existing) {
       desc.sample = { ts: desc.ts, kwh: existing.kwh, balance: existing.balance };
       if (existing.raw === 'manual') {
@@ -200,14 +206,17 @@ async function retryCollection(env, reading) {
         desc.endText = extractEnd(existing.raw) || head?.tail || '';
       }
     }
-    const [previousBalance] = await loadPreviousBalances(env, [desc]);
+    const [previousBalance] = await loadPreviousBalances(env, [desc], record);
     if (existing) {
       const item = buildStatus(env, desc, previousBalance, HAS_SAMPLE);
       const result = await item.statusStatement.run();
+      record(result);
       if (result.meta?.changes > 0) return { item, inserted: 0 };
     } else {
       const item = buildStatements(env, desc, previousBalance);
       const [data, status] = await env.DB.batch([item.dataStatement, item.statusStatement]);
+      record(data);
+      record(status);
       if (status.meta?.changes > 0) return { item, inserted: data.meta.changes };
     }
   }
@@ -229,17 +238,28 @@ export async function persistCollections(env, results, {
   let endChanged = 0;
   let insertError = null;
   const committed = [];
+  const usage = {};
+  function record(group, result) {
+    const totals = usage[group] ??= { rows_read: 0, rows_written: 0 };
+    totals.rows_read += result.meta?.rows_read ?? 0;
+    totals.rows_written += result.meta?.rows_written ?? 0;
+  }
 
   try {
-    const heads = okOnes.length
+    const headResults = okOnes.length
       ? (await env.DB.batch(
           okOnes.map((r) => env.DB.prepare(HEAD_STATUS).bind(r.serial)),
-        )).map((r) => r.results?.[0] ?? null)
+        ))
       : [];
     // 重复采样只消耗一次头部读取，不进入余额查询与写入批次。
-    const descs = okOnes.map((r, i) => describeCollection(r, heads[i])).filter(Boolean);
+    const descs = [];
+    okOnes.forEach((reading, i) => {
+      const desc = describeCollection(reading, headResults[i].results[0]);
+      record(desc ? 'sample' : 'duplicate', headResults[i]);
+      if (desc) descs.push(desc);
+    });
 
-    const balances = await loadPreviousBalances(env, descs);
+    const balances = await loadPreviousBalances(env, descs, result => record('sample', result));
     const plan = descs.map((desc, i) => buildStatements(env, desc, balances[i]));
 
     const statements = plan.flatMap(item => [item.dataStatement, item.statusStatement]);
@@ -248,6 +268,7 @@ export async function persistCollections(env, results, {
 
     if (statements.length) {
       const batchResults = await env.DB.batch(statements);
+      batchResults.forEach((result, i) => record(i < failureOffset ? 'sample' : 'failure', result));
       const conflicts = [];
       for (let i = 0; i < plan.length; i++) {
         inserted += batchResults[i * 2]?.meta?.changes ?? 0;
@@ -262,7 +283,7 @@ export async function persistCollections(env, results, {
 
       for (const reading of conflicts) {
         try {
-          const retry = await retryCollection(env, reading);
+          const retry = await retryCollection(env, reading, result => record('retry', result));
           if (!retry) continue;
           const { item } = retry;
           inserted += retry.inserted;
@@ -276,6 +297,8 @@ export async function persistCollections(env, results, {
   } catch (e) {
     insertError = e.message;
   }
+
+  console.log(JSON.stringify({ batch_id: batchId, source, d1_usage: usage }));
 
   // 通知失败不回滚已提交的采样和状态。
   const notifications = await Promise.allSettled(
