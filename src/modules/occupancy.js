@@ -196,7 +196,7 @@ export function computeOptimalBaseline(rows, currentBaseLine = DEFAULT_BASE_LINE
 
   let best = null;
   for (const baseW of candidates) {
-    for (const winMin of [15, 21, 24, 30, 36]) {
+    for (const winMin of [5, 9, 15, 23, 33]) {
       const candidate = `${baseW}w/${winMin}m`;
       const baseline = parseBaseline(candidate);
 
