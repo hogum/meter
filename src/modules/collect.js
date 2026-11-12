@@ -74,7 +74,7 @@ export function extractFront(raw) {
  * 首轮并发抓取，成功采样立即入库并通知，失败的电表退避重试后单独入库。
  */
 export async function runCollect(env, { source = 'cron' } = {}) {
-  const meters = getMeters(env);
+  const serials = [...getMeters(env)];
   const deviceApiUrl = URL.parse(env.SOURCE_URL);
   if (deviceApiUrl?.protocol !== 'http:' && deviceApiUrl?.protocol !== 'https:') {
     throw new Error('SOURCE_URL 必须配置为有效的 HTTP(S) 地址');
@@ -98,9 +98,9 @@ export async function runCollect(env, { source = 'cron' } = {}) {
     return submitting;
   }
 
-  const perMeter = await Promise.all(meters.map(async meter => {
-    const result = await fetchDevice(meter.serial, deviceApiUrl);
-    return enqueue({ ...meter, ...result });
+  const perMeter = await Promise.all(serials.map(async serial => {
+    const result = await fetchDevice(serial, deviceApiUrl);
+    return enqueue({ serial, ...result });
   }));
   const reports = [...new Set(perMeter)];
   const combined = { ...reports[0] };
@@ -111,15 +111,24 @@ export async function runCollect(env, { source = 'cron' } = {}) {
   combined.insert_error = reports.find(report => report.insert_error)?.insert_error ?? null;
   if (combined.insert_error) combined.duplicated = 0;
   const detail = new Map(reports.flatMap(report => report.detail).map(item => [item.serial, item]));
-  combined.detail = meters.map(meter => detail.get(meter.serial));
+  combined.detail = serials.map(serial => detail.get(serial));
   combined.duration_ms = Date.now() - startedAt;
   return combined;
+}
+
+/** 采样房间名优先取 houseName，其次取 userName。 */
+function pickRoom(payload) {
+  for (const value of [payload.houseName, payload.userName]) {
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return null;
 }
 
 /** 返回 null 表示状态已处理或超越这一时刻。 */
 function describeCollection(reading, head) {
   const p = reading.payload;
   const serial = reading.serial;
+  const room = pickRoom(p);
   const statusTime = p.lastOnlineTime;
   if (head && statusTime <= head.last_online_time) return null;
   const ts = toEpoch(statusTime);
@@ -139,7 +148,7 @@ function describeCollection(reading, head) {
   }
 
   return {
-    reading, serial, statusTime, ts, head, frontText, endText,
+    reading, serial, room, statusTime, ts, head, frontText, endText,
     sample: {
       ts,
       kwh: typeof p.readNumber === 'number' ? p.readNumber : null,
@@ -150,7 +159,7 @@ function describeCollection(reading, head) {
 
 /** 只在有电表需要充值判断时，批量查询各表上次有效余额。 */
 async function loadPreviousBalances(env, descs, record) {
-  const targets = descs.filter((d) => d.sample.balance != null && env[`WH_${d.reading.room}`]);
+  const targets = descs.filter((d) => d.sample.balance != null && d.room && env[`WH_${d.room}`]);
   if (!targets.length) return descs.map(() => null);
   const results = await env.DB.batch(
     targets.map((d) => env.DB.prepare(PREVIOUS_BALANCE).bind(d.serial, d.ts)),
@@ -170,14 +179,13 @@ function buildStatus(env, desc, previousBalance, guard) {
         state.broke, state.base_line, state.last_kwh, state.delta, state.duration, desc.endText, headTime, headBase)
     : env.DB.prepare(UPDATE_STATUS + guard).bind(desc.serial, desc.statusTime, state.occupied,
         state.broke, state.last_kwh, state.delta, state.duration, headTime, headBase);
-  return { reading: desc.reading, serial: desc.serial, hasEnd, events, statusStatement };
+  return { reading: desc.reading, serial: desc.serial, room: desc.room, hasEnd, events, statusStatement };
 }
 
 /** 依据状态快照与上次余额生成该表的两条写语句。 */
 function buildStatements(env, desc, previousBalance) {
-  const p = desc.reading.payload;
   const dataStatement = env.DB.prepare(INSERT_DATA).bind(
-    desc.serial, desc.ts, p.houseName || p.userName || null, desc.statusTime, desc.sample.kwh,
+    desc.serial, desc.ts, desc.room, desc.statusTime, desc.sample.kwh,
     desc.sample.balance,
     typeof desc.reading.durationMs === 'number' ? desc.reading.durationMs : null, desc.frontText,
     desc.head?.last_online_time ?? null, desc.head?.base_line ?? null,
@@ -230,7 +238,7 @@ export async function persistCollections(env, results, {
   const okOnes = results.filter((r) => r.ok && r.payload.valveStateName !== null);
   const failed = results.filter((r) => !r.ok);
   const failureStatements = failed.map(r => env.DB.prepare(INSERT_FAILURE).bind(
-    Math.floor(startedAt / 1000), r.serial, r.room, null, null, null, r.durationMs, r.raw,
+    Math.floor(startedAt / 1000), r.serial, null, null, null, null, r.durationMs, r.raw,
   ));
 
   let inserted = 0;
@@ -302,7 +310,7 @@ export async function persistCollections(env, results, {
 
   // 通知失败不回滚已提交的采样和状态。
   const notifications = await Promise.allSettled(
-    committed.map((item) => checkNotifications(env, item.serial, item.reading.room, item.events)),
+    committed.map((item) => checkNotifications(env, item.serial, item.room, item.events)),
   );
   for (const result of notifications) {
     if (result.status === 'rejected') console.error('通知检查失败:', result.reason?.message ?? result.reason);

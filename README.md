@@ -61,7 +61,7 @@
 
 ## 发布前准备
 
-部署前配置运行时变量 `SOURCE_URL` 和 `METERS`。`METERS` 可以填写 JSON 文本，例如 `{"12345678":"A101"}`。将 `JWT_SECRET` 设为 Secret，使用手动上报时也需配置 `UPLOAD_TOKEN`。D1 绑定在 `wrangler.jsonc` 中配置。
+部署前配置运行时变量 `METERS` 和（若启用定时采集）`SOURCE_URL`。`METERS` 用英文逗号分隔单个表号和范围，例如 `12345678,12345680-12345682`。范围包含两端，重复表号只处理一次，每段范围最多包含 10,000 个表号。将 `JWT_SECRET` 设为 Secret，使用手动上报时也需配置 `UPLOAD_TOKEN`。D1 绑定在 `wrangler.jsonc` 中配置。
 
 ## 更新现有云端项目
 
@@ -86,14 +86,14 @@ npx wrangler deploy
 | d1_databases | DB 绑定、数据库名称与 ID，更新现有项目时沿用现有值 |
 | assets | public/ 静态目录及 ASSETS 绑定 |
 | triggers.crons | 定时采集计划，当前每两分钟 |
-| METERS | 表号到房间号的映射，供采集和上报共同使用 |
+| METERS | 允许采集、上报和历史导入的表号列表，用英文逗号分隔表号和范围 |
 | SOURCE_URL | 定时采集使用的上游设备详情地址 |
 | RECHARGE_URL | 充值页面地址，跳转时自动带上当前电表的 `no` 参数。未配置时隐藏按钮 |
 | JWT_SECRET | JWT 会话签名密钥 |
 | UPLOAD_TOKEN | /api 上报和历史导入凭证 |
-| WH_<房间号> | 对应房间的企业微信群机器人地址，未配置则不推送 |
+| WH_<房间号> | 对应房间的企业微信群机器人地址（按上游返回的房间名匹配，未配置则不推送） |
 
-`keep_vars: true` 会保留控制台设置的普通变量。`METERS` 决定采集对象，`users` 表决定账号登录授权。
+`keep_vars: true` 会保留控制台设置的普通变量。升级已有部署时，如 `METERS` 仍为 JSON，需在控制台改成新格式。`users` 表决定账号登录授权。
 
 ## 获取企业微信 Webhook 地址
 
@@ -102,7 +102,7 @@ npx wrangler deploy
 3. 填写名称等信息，创建后复制页面提供的完整 Webhook 地址；已有推送可由创建者查看详情获取。
 4. 在 Cloudflare Worker 的运行时 Variables and Secrets 中添加对应房间的变量，例如 `WH_A101`，值填刚复制的完整地址。
 
-每个房间按 `WH_<房间号>` 配置；未配置的房间仍会采集和展示数据，但不发送群通知。实际地址不要提交到 GitHub。
+定时采集按上游返回的房间号匹配 `WH_<房间号>`，优先取 `houseName`，为空时取 `userName`。手动上报使用表单里的 `room`。缺少房间号或对应 Webhook 时只记录采样。实际地址不要提交到 GitHub。
 
 [企业微信官方消息推送配置说明](https://developer.work.weixin.qq.com/document/path/99110) · [腾讯云获取步骤图解](https://cloud.tencent.com/document/product/1759/128391)
 
@@ -146,7 +146,7 @@ npx wrangler d1 execute meter --local --file db/seed-users.sql
 
 ## 可选本地预览
 
-把 `example.env` 复制为同目录下的 `.env`，填入采集地址、表号映射和本地登录用的签名密钥。
+把 `example.env` 复制为同目录下的 `.env`，填入采集地址、表号列表和本地登录用的签名密钥。
 
 ```sh
 npx wrangler dev
@@ -189,7 +189,7 @@ Worker 对 `SOURCE_URL` 发起 GET 请求，并通过查询参数 `SerialNo` 传
 | POST /api?act=up&tk=xxx | 提交实时读数或导入 TXT、JSONL 历史数据 |
 | GET /clean | 登录后手动删除当前电表 90 天前的采样，保留账号及状态；无页面按钮，不自动执行 |
 
-GET 和 POST 都通过查询参数 `tk` 校验 `UPLOAD_TOKEN`。实时上报在 POST 表单中提交 `no`（表号）、`kwh`（累计读数）和 `balance`（余额）。可选的 `room` 必须与 `METERS` 映射匹配。服务端使用接收时间，跨秒重复请求由调用端控制。
+GET 和 POST 都通过查询参数 `tk` 校验 `UPLOAD_TOKEN`。实时上报在 POST 表单中提交 `no`（表号，须在 `METERS` 中）、`kwh`（累计读数）和 `balance`（余额），可选传入 `room`（用于记录房间号并匹配 `WH_<房间号>` 通知）。服务端使用接收时间，跨秒重复请求由调用端控制。
 
 ```sh
 curl -d 'no=12345678&kwh=1234.56&balance=78.9' 'https://example.com/api?act=up&tk=xxx'

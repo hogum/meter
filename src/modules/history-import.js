@@ -63,8 +63,7 @@ function csvNumber(value) {
 }
 
 /** 校验完整个文件，再将记录分成可独立重试的 D1 写入批次。 */
-export function prepareHistoryImport(text, meters) {
-  const serials = new Set(meters.map(meter => meter.serial));
+export function prepareHistoryImport(text, serials) {
   const firstContent = /[^ \t\r\n]/g;
   const lineBreak = /\r\n|[\r\n]/g;
   const jsonToken = /"[^"\\]*(?:\\[\s\S][^"\\]*)*"|[{}]/g;

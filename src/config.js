@@ -1,21 +1,36 @@
-/** 电表映射来自 env.METERS，支持 JSON 文本或对象。 */
+const MAX_RANGE_SIZE = 10_000n;
+
+/** METERS 以英文逗号分隔单个表号或闭区间。 */
 export function getMeters(env) {
-  let mapping = env.METERS;
-  try {
-    if (typeof mapping === 'string') mapping = JSON.parse(mapping);
-  } catch {
-    throw new Error('METERS配置不是有效JSON');
+  const raw = env.METERS;
+  if (typeof raw !== 'string' || !raw.trim()) {
+    throw new Error('METERS 须填写英文逗号分隔的表号或范围');
   }
-  if (!mapping || typeof mapping !== 'object' || Array.isArray(mapping)
-      || Object.keys(mapping).length === 0) {
-    throw new Error('METERS须为非空的表号与房间映射对象');
-  }
-  return Object.entries(mapping).map(([serial, room]) => {
-    if (!/^\d+$/.test(serial) || typeof room !== 'string' || !room.trim()) {
-      throw new Error('METERS中的表号或房间号无效');
+
+  const serials = new Set();
+  for (const entry of raw.split(',')) {
+    const match = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(entry.trim());
+    if (!match) throw new Error('METERS 中的表号或范围格式无效');
+    const [, first, last] = match;
+    if (last === undefined) {
+      serials.add(first);
+      continue;
     }
-    return { serial, room: room.trim() };
-  });
+
+    const start = BigInt(first);
+    const end = BigInt(last);
+    const width = first.length;
+    if (end < start || end.toString().padStart(width, '0') !== last) {
+      throw new Error('METERS 范围须按升序填写，前导零须与起点宽度一致');
+    }
+    if (end - start >= MAX_RANGE_SIZE) {
+      throw new Error(`METERS 每段范围最多包含 ${MAX_RANGE_SIZE} 个表号`);
+    }
+    for (let value = start; value <= end; value++) {
+      serials.add(value.toString().padStart(width, '0'));
+    }
+  }
+  return serials;
 }
 
 /** 单次请求超时（毫秒） */

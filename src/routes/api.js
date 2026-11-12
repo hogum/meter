@@ -91,17 +91,17 @@ export async function upload(request, env) {
   } catch {
     return reply(400, { success: false, error: '请提交表单数据' });
   }
-  let meters;
+  let serials;
   try {
-    meters = getMeters(env);
+    serials = getMeters(env);
   } catch {
-    return reply(503, { success: false, error: '电表映射配置无效' });
+    return reply(503, { success: false, error: 'METERS 配置无效' });
   }
-  if (form.has('file')) return importFile(env.DB, form.get('file'), meters);
-  return uploadReading(env, form, meters, startedAt);
+  if (form.has('file')) return importFile(env.DB, form.get('file'), serials);
+  return uploadReading(env, form, serials, startedAt);
 }
 
-async function importFile(db, file, meters) {
+async function importFile(db, file, serials) {
   if (!(file instanceof File) || !file.size) {
     return reply(400, { success: false, error: '请选择包含采样记录的 TXT 或 JSONL 文件' });
   }
@@ -115,7 +115,7 @@ async function importFile(db, file, meters) {
   }
   let plan;
   try {
-    plan = prepareHistoryImport(text, meters);
+    plan = prepareHistoryImport(text, serials);
   } catch (error) {
     return reply(400, { success: false, error: error.message });
   }
@@ -123,11 +123,14 @@ async function importFile(db, file, meters) {
   return reply(result.success ? 200 : 500, result);
 }
 
-async function uploadReading(env, form, meters, startedAt) {
-  const meter = meters.find(m => m.serial === form.get('no'));
-  if (!meter) return reply(400, { success: false, error: '未知电表' });
-  const room = form.get('room');
-  if (room && room !== meter.room) return reply(400, { success: false, error: '房间号与电表不匹配' });
+async function uploadReading(env, form, serials, startedAt) {
+  const serial = form.get('no');
+  if (!serials.has(serial)) return reply(400, { success: false, error: '未知电表' });
+  const rawRoom = form.get('room');
+  if (rawRoom != null && typeof rawRoom !== 'string') {
+    return reply(400, { success: false, error: '房间号格式无效' });
+  }
+  const room = rawRoom?.trim() || null;
   const number = key => {
     const value = form.get(key);
     return typeof value === 'string' && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value)
@@ -142,8 +145,8 @@ async function uploadReading(env, form, meters, startedAt) {
   let result;
   try {
     result = await persistCollections(env, [{
-      ok: true, manual: true, serial: meter.serial, room: meter.room, raw: 'manual', durationMs: null,
-      payload: { serialNo: meter.serial, houseName: meter.room, lastOnlineTime: time,
+      ok: true, manual: true, serial, raw: 'manual', durationMs: null,
+      payload: { serialNo: serial, houseName: room, lastOnlineTime: time,
         readNumber: kwh, residualAmount: balance },
     }], { startedAt });
   } catch {
