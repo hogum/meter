@@ -1336,14 +1336,58 @@ function main() {
 
   const chartRef = { usage: null, balance: null };
 
-  // 缓存可见跨度，避免每个刻度格式化时深拷贝getOption()。
+  // 缓存可见跨度与大跨度日期抽样集合，避免每个刻度格式化时深拷贝getOption()。
   const spanCache = { usage: axisSpanDays, balance: axisSpanDays };
+  const keptNoonsCache = { usage: null, balance: null };
   const spanOf = (which) => spanCache[which];
-  const narrowAxis = (which) => {
-    const width = chartRef[which]?.getWidth()
-      ?? document.getElementById(`chart-${which === 'usage' ? 'usage' : 'balance'}`)?.clientWidth
-      ?? 800;
-    return width < 520;
+  const chartWidth = (which) => chartRef[which]?.getWidth()
+    ?? document.getElementById(`chart-${which === 'usage' ? 'usage' : 'balance'}`)?.clientWidth
+    ?? 800;
+  const narrowAxis = (which) => chartWidth(which) < 520;
+  // 窄屏或 6 小时刻度过密时改用 12 小时刻度，避免 ECharts 自动选成 8 小时（00/08/16）而跳过中午 12 点日期。
+  const halfDayOnly = (spanDays, which) => spanDays >= 1.5
+    && (narrowAxis(which) || (spanDays <= 7.05 && spanDays * 4 * 52 > chartWidth(which)));
+
+  const NOON_MS = 12 * 3600000;
+  // 大跨度（>7 天）由前端统一计算等距且首尾相同的日期刻度，确保两图对齐且中间间距完全均匀。
+  const computeKeptNoons = (ext0, ext1, spanDays, which) => {
+    if (!(spanDays > 7.05) || !Number.isFinite(ext0) || !Number.isFinite(ext1)) return { key: '', set: null };
+    const firstNoon = Math.ceil((ext0 - NOON_MS) / 86400000) * 86400000 + NOON_MS;
+    const lastNoon = Math.floor((ext1 - NOON_MS) / 86400000) * 86400000 + NOON_MS;
+    const totalDays = Math.round((lastNoon - firstNoon) / 86400000);
+    if (totalDays < 1) return { key: '', set: null };
+
+    const minGapOf = (name) => Math.max(1, Math.ceil((spanDays * 54) / Math.max(chartWidth(name), 200)));
+    const minU = minGapOf('usage');
+    const minB = minGapOf('balance');
+    let picked = null;
+    for (let trim = 0; trim <= Math.min(3, totalDays - 1) && !picked; trim++) {
+      const d = totalDays - trim;
+      for (let stepB = minB; stepB <= minB + 2 && !picked; stepB++) {
+        if (d % stepB !== 0) continue;
+        for (let stepU = minU; stepU <= Math.min(minU + 1, stepB); stepU++) {
+          if (d % stepU === 0 && stepB % stepU === 0) picked = { trim, d, stepU, stepB };
+        }
+        if (!picked) {
+          for (let stepU = minU; stepU <= Math.min(minU + 1, stepB); stepU++) {
+            if (d % stepU === 0) { picked = { trim, d, stepU, stepB }; break; }
+          }
+        }
+      }
+    }
+    picked ??= { trim: 0, d: totalDays, stepU: minU, stepB: minB };
+
+    // 若总天数需微调以整除步长，优先裁掉离可视边界更近的那一端。
+    const dLeft = firstNoon - ext0;
+    const dRight = ext1 - lastNoon;
+    const trimLeft = Math.floor(picked.trim / 2) + (picked.trim % 2 === 1 && dLeft < dRight ? 1 : 0);
+    const startNoon = firstNoon + trimLeft * 86400000;
+    const endNoon = startNoon + picked.d * 86400000;
+    const step = which === 'usage' ? picked.stepU : picked.stepB;
+
+    const set = new Set();
+    for (let t = startNoon; t <= endNoon; t += step * 86400000) set.add(t);
+    return { key: `${startNoon}:${endNoon}:${step}`, set };
   };
 
   // 日期固定标在 12 点，其他标签按可见跨度调整。
@@ -1352,21 +1396,31 @@ function main() {
     const span = spanOf(which);
     const h = d.getUTCHours();
     const md = `${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+    if (h === 12) {
+      const kept = keptNoonsCache[which];
+      if (kept && !kept.has(v)) return '';
+      return `{day|${md}}`;
+    }
     // 窄屏多日视图仅在中午显示日期，隐藏小时以避免重叠。
-    if (span >= 1.5 && narrowAxis(which)) return h === 12 ? `{day|${md}}` : '';
-    if (h === 12) return `{day|${md}}`;
-    if (span >= 7) return '';
+    if (span >= 1.5 && narrowAxis(which)) return '';
+    if (span > 7.05) return '';
+    if (halfDayOnly(span, which) && h !== 12 && h !== 0) return '';
     if (span < 0.5) return `{hm|${pad(h)}:${pad(d.getUTCMinutes())}}`;
     return `{hm|${pad(h)}:00}`;
   };
 
-  /** 刻度最小间隔：都是 12 小时的因数，12:00 保证落在刻度上 */
+  /** 刻度最小/最大间隔：留出毫秒容差包住目标步长，避免 ECharts 6.1 边界判等回退到 6h/8h */
   const minIntervalOf = (spanDays, which) => (
-    spanDays >= 1.5 && narrowAxis(which) ? 43200000 : spanDays >= 0.5 ? 21600000 : 3600000
+    halfDayOnly(spanDays, which) ? 43000000 : spanDays >= 0.5 ? 21500000 : 3500000
   );
-  // 窄屏多日视图固定半天刻度，确保生成12点刻度；其他视图放开上限。
+  // 0.5~7 天内固定 6 小时或 12 小时刻度，防止缩放或 7 天图跳到 6h/8h。
   const maxIntervalOf = (spanDays, which) => (
-    spanDays >= 1.5 && narrowAxis(which) ? 43200000 : Number.MAX_SAFE_INTEGER
+    halfDayOnly(spanDays, which) ? 44000000
+      : (spanDays >= 0.5 && spanDays <= 7.05) ? 22000000
+      : Number.MAX_SAFE_INTEGER
+  );
+  const splitNumberFor = (spanDays) => (
+    spanDays <= 1.5 ? 5 : spanDays <= 4 ? 6 : spanDays <= 12 ? 12 : 50
   );
 
   // dataZoom 配置可能滞后，优先读取坐标轴的实际可见范围。
@@ -1393,17 +1447,22 @@ function main() {
 
   // 刻度与纵轴更新缓存
   const axisUpdateCache = new WeakMap();
-  const labelModeFor = (span, which) => span >= 7 || (span >= 1.5 && narrowAxis(which))
+  const labelModeFor = (span, which) => span > 7.05 || (span >= 1.5 && narrowAxis(which))
     ? 'date' : span < 0.5 ? 'minute' : 'hour';
   const rememberAxes = (chart, which, yAxis) => {
+    const ext = chartTimeExtent(chart);
+    const kept = computeKeptNoons(ext[0], ext[1], axisSpanDays, which);
+    keptNoonsCache[which] = kept.set;
     axisUpdateCache.set(chart, {
       minInterval: minIntervalOf(axisSpanDays, which),
       maxInterval: maxIntervalOf(axisSpanDays, which),
       labelMode: labelModeFor(axisSpanDays, which),
+      keptKey: kept.key,
       yAxis,
       from: firstDataTime,
       to: lastDataTime,
     });
+    if (kept.set) chart.setOption({ xAxis: { minInterval: minIntervalOf(axisSpanDays, which) } });
   };
   /** 每帧计算一次，只在刻度档位或纵轴数值发生变化时更新配置。 */
   let refreshing = false;
@@ -1419,6 +1478,8 @@ function main() {
       const minInterval = minIntervalOf(span, which);
       const maxInterval = maxIntervalOf(span, which);
       const labelMode = labelModeFor(span, which);
+      const kept = computeKeptNoons(ext[0], ext[1], span, which);
+      keptNoonsCache[which] = kept.set;
       const from = fromChartTime(ext[0]);
       const to = fromChartTime(ext[1]);
       const yAxis = previous && previous.from === from && previous.to === to
@@ -1428,12 +1489,12 @@ function main() {
           : balanceAxisForRange(points, from, to);
       const update = {};
       if (!previous || previous.minInterval !== minInterval || previous.maxInterval !== maxInterval
-        || previous.labelMode !== labelMode) {
-        update.xAxis = { minInterval, maxInterval };
+        || previous.labelMode !== labelMode || previous.keptKey !== kept.key) {
+        update.xAxis = { minInterval, maxInterval, splitNumber: splitNumberFor(span) };
       }
       if (!previous || previous.yAxis.min !== yAxis.min || previous.yAxis.max !== yAxis.max)
         update.yAxis = yAxis;
-      axisUpdateCache.set(chart, { minInterval, maxInterval, labelMode, yAxis, from, to });
+      axisUpdateCache.set(chart, { minInterval, maxInterval, labelMode, keptKey: kept.key, yAxis, from, to });
       if (update.xAxis || update.yAxis) chart.setOption(update);
     } finally {
       refreshing = false;
