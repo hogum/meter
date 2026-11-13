@@ -1,8 +1,9 @@
-import { buildSummary, RANGE_SECONDS, DEFAULT_RANGE } from '../modules/summary.js';
+import { buildDemoSummary, buildSummary, DEMO_EMPTY_MESSAGE, selectDemoWindow, RANGE_SECONDS, DEFAULT_RANGE } from '../modules/summary.js';
 import { all, first } from '../db/index.js';
 import { getSession } from '../lib/auth.js';
 import { successfulCollectionSql } from '../modules/collection-error.js';
 import { IMPORTED_JSON_PREFIX } from '../modules/history-import.js';
+import { getDemoLatest, getDemoSamples } from '../modules/demo.js';
 
 const RANGE_OPTIONS = [
   ['24h', '近 24 小时'],
@@ -28,11 +29,11 @@ function parseLocalMinute(value, endOfMinute = false) {
 }
 
 /** 从 query 里取一对合法区间；不合法或不完整时返回 null */
-function pickWindow(searchParams) {
+function pickWindow(searchParams, allowSingleInstant = false) {
   const from = parseLocalMinute(searchParams.get('from'));
   // 输入框精度到分钟，结束边界包含该分钟；导出链接有秒数时保留精确边界。
   const to = parseLocalMinute(searchParams.get('to'), true);
-  if (from === null || to === null || to <= from) return null;
+  if (from === null || to === null || to < from || (to === from && !allowSingleInstant)) return null;
   return { from, to };
 }
 
@@ -55,7 +56,7 @@ function inject(html, key, value) {
   return html.replace(`"__${key}_PLACEHOLDER__"`, () => JSON.stringify(value).replace(/</g, '\\u003c'));
 }
 
-/** 未登录不注入业务数据；登录后仅查询 JWT 绑定的电表。 */
+/** 登录后加载会话对应的真实电表或演示数据。 */
 export async function dashboard(request, env) {
   const url = new URL(request.url);
   const range = pickRange(url.searchParams.get('range'));
@@ -74,23 +75,23 @@ export async function dashboard(request, env) {
     });
   }
 
-  const win = pickWindow(url.searchParams);
+  const win = pickWindow(url.searchParams, session.demo);
 
   let view = null;
   try {
-    const payload = await buildSummary(env, {
-      serial: session.serial,
-      range,
-      from: win?.from,
-      to: win?.to,
-    });
-    view = payload ? {
-      ...payload,
-      ranges: RANGE_OPTIONS,
-      range: win ? 'custom' : range,
-      // 用 summary 截断过的区间，否则输入框会显示选到未来去的 to
-      window: payload.window,
-    } : { error: '该电表暂无采集数据' };
+    const options = { serial: session.serial, range, from: win?.from, to: win?.to };
+    const payload = session.demo ? buildDemoSummary(options) : await buildSummary(env, options);
+    view = !payload
+      ? { error: '该电表暂无采集数据' }
+      : payload.error
+        ? payload
+        : {
+            ...payload,
+            ranges: RANGE_OPTIONS,
+            range: win ? 'custom' : range,
+            // 用 summary 截断过的区间，否则输入框会显示选到未来去的 to
+            window: payload.window,
+          };
   } catch (e) {
     const message = String(e?.message || e);
     const quota = /exceeded D1.*daily row (read|write) limit/i.exec(message);
@@ -121,6 +122,7 @@ export async function recharge(request, env) {
   if (!session) {
     return new Response('请先登录', { status: 401, headers });
   }
+  if (session.demo) return new Response('演示账号不支持充值', { status: 403, headers });
   const url = getRechargeUrl(env);
   if (!url) return new Response('充值入口未配置', { status: 404, headers });
 
@@ -151,17 +153,20 @@ export async function exportData(request, env) {
 
   const serial = session.serial;
 
-  const latest = await first(env.DB, `SELECT ts, room FROM data WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`, [serial]);
+  const latest = session.demo ? getDemoLatest() : await first(env.DB,
+    `SELECT ts, room FROM data WHERE serial_no = ?1 ORDER BY ts DESC LIMIT 1`, [serial]);
   if (!latest) return new Response('该表还没有数据', { status: 404 });
 
-  const win = pickWindow(url.searchParams);
-  const from = win ? win.from : latest.ts - (RANGE_SECONDS[range] || RANGE_SECONDS[DEFAULT_RANGE]);
-  const to = win ? Math.min(win.to, latest.ts) : latest.ts;
+  const win = pickWindow(url.searchParams, session.demo);
+  const demoWindow = session.demo && selectDemoWindow(latest.ts, range, win?.from, win?.to);
+  if (session.demo && !demoWindow) return new Response(DEMO_EMPTY_MESSAGE, { status: 404 });
+  const from = demoWindow ? demoWindow.sinceTs : win?.from ?? latest.ts - RANGE_SECONDS[range];
+  const to = demoWindow ? demoWindow.untilTs : Math.min(win?.to ?? latest.ts, latest.ts);
 
-  const rows = await all(
+  const rows = session.demo ? getDemoSamples(from, to, latest.ts) : await all(
     env.DB,
     `SELECT raw, serial_no, room, kwh, balance,
-       COALESCE(time, datetime(ts, 'unixepoch', '+8 hours')) AS sample_time
+       COALESCE(time, datetime(ts, 'unixepoch', '+8 hours')) AS time
        FROM data
       WHERE serial_no = ?1 AND ts >= ?2 AND ts <= ?3
         AND ${successfulCollectionSql()}
@@ -170,20 +175,21 @@ export async function exportData(request, env) {
   );
 
   // 一次读取该表的后半段版本，在内存匹配，避免对每条采样执行关联子查询。
-  const versions = rows.some(r => r.raw !== 'manual' && !r.raw.startsWith(IMPORTED_JSON_PREFIX)) ? await all(env.DB,
+  const needsTail = !session.demo && rows.some(r => r.raw !== 'manual' && !r.raw.startsWith(IMPORTED_JSON_PREFIX));
+  const versions = needsTail ? await all(env.DB,
     `SELECT last_online_time, tail FROM status WHERE serial_no = ?1 ORDER BY last_online_time`,
     [serial]) : [];
   let versionIndex = 0;
   let previousTime = null;
   const body = rows.map((r) => {
     if (r.raw === 'manual') {
-      return ['manual', r.serial_no, r.room, r.sample_time, r.kwh, r.balance].map(value => {
+      return ['manual', r.serial_no, r.room, r.time, r.kwh, r.balance].map(value => {
         const text = String(value ?? '');
         return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
       }).join(',');
     }
     if (r.raw.startsWith(IMPORTED_JSON_PREFIX)) return r.raw.slice(IMPORTED_JSON_PREFIX.length);
-    const time = r.sample_time;
+    const time = r.time;
     // 通常 time 与 ts 同序；异常旧数据时间倒序时重新定位，保持原 SQL 语义。
     if (time != null && previousTime != null && time < previousTime) versionIndex = 0;
     if (time != null) {

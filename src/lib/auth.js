@@ -3,6 +3,7 @@ import { verifyJwt } from './jwt.js';
 export const COOKIE_NAME = 'meter_token';
 
 export const MAX_AGE_SECONDS = 7 * 24 * 3600;
+const DEMO_USER = 'demo';
 
 export function readCookie(request, name) {
   const raw = request.headers.get('cookie') || '';
@@ -20,7 +21,7 @@ export function readCookie(request, name) {
 }
 
 /**
- * 返回 { user, serial, exp }，令牌无效或解析异常时返回 null。
+ * 返回 { user, serial, exp, demo }，令牌无效或解析异常时返回 null。
  */
 export async function getSession(request, env) {
   try {
@@ -28,7 +29,9 @@ export async function getSession(request, env) {
     if (!token) return null;
     const payload = await verifyJwt(token, env.JWT_SECRET);
     if (!payload || !payload.sub || !payload.sid) return null;
-    return { user: payload.sub, serial: payload.sid, exp: payload.exp };
+    // demo 账号也由 users 表认证；账号名只负责选择演示数据源。
+    const demo = payload.sub.toLowerCase() === DEMO_USER;
+    return { user: payload.sub, serial: payload.sid, exp: payload.exp, demo };
   } catch {
     return null;
   }

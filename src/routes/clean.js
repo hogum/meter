@@ -9,6 +9,7 @@ const reply = (status, body) => new Response(JSON.stringify(body), { status, hea
 export async function clean(request, env) {
   const session = await getSession(request, env);
   if (!session) return reply(401, { success: false, error: '请先登录' });
+  if (session.demo) return reply(403, { success: false, error: '演示账号不支持清理数据' });
   const origin = request.headers.get('origin');
   const site = request.headers.get('sec-fetch-site');
   if ((origin && origin !== new URL(request.url).origin)

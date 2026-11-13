@@ -1,7 +1,8 @@
 import { first, run } from '../db/index.js';
-import { BASE_SECONDS, computeOptimalBaseline, HEATER_BASE_STEP, parseBaseline } from './occupancy.js';
+import { BASE_SECONDS, computeOptimalBaseline, DEFAULT_BASE_LINE, HEATER_BASE_STEP, parseBaseline } from './occupancy.js';
 import { successfulCollectionSql, readCollectionError } from './collection-error.js';
 import { analyzeHistory, historyIntervals, HISTORY_CONTEXT_SECONDS } from './history-occupancy.js';
+import { DEMO_HISTORY_SECONDS, DEMO_SAMPLE_SECONDS, getDemoLatest, getDemoSamples } from './demo.js';
 
 export const RANGE_SECONDS = {
   '6h': 6 * 3600,
@@ -24,6 +25,24 @@ const UPDATE_BASE_LINE = `UPDATE status SET base_line = ?1
     AND last_online_time = (SELECT last_online_time FROM status
       WHERE serial_no = ?2 ORDER BY last_online_time DESC LIMIT 1)`;
 
+function selectWindow(latestTs, range, from, to) {
+  // 区间：传了 from/to 就用自定义（Unix 秒），否则按预设范围从最新采样往回推。
+  // 仅在截断后仍有有效区间时截到最新采样，避免导出把倒置或等长边界当成默认范围。
+  const custom = Number.isFinite(from) && Number.isFinite(to) && to > from;
+  const untilTs = custom
+    ? (from < latestTs ? Math.min(to, latestTs) : to)
+    : latestTs;
+  const sinceTs = custom
+    ? from
+    : latestTs - (RANGE_SECONDS[range] || RANGE_SECONDS[DEFAULT_RANGE]);
+
+  // 两端各取上下文：历史可用后续数据识别加热和短暂停顿，但展示不超出区间。
+  const fetchFrom = sinceTs - HISTORY_CONTEXT_SECONDS;
+  const fetchUntil = Math.min(latestTs, untilTs + HISTORY_CONTEXT_SECONDS);
+
+  return { custom, untilTs, sinceTs, fetchFrom, fetchUntil };
+}
+
 /** 用电量累计有效相邻增量；有人区间不跨越未知片段，末态取选中范围末次采样。 */
 export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, to } = {}) {
   // 两条独立查询合并一次往返；latestStatus 只用于基线与实时状态。
@@ -34,20 +53,8 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   ]);
   if (!latestEntry) return null;
 
-  // 区间：传了 from/to 就用自定义（Unix 秒），否则按预设范围从最新采样往回推。
-  // 仅在截断后仍有有效区间时截到最新采样，避免导出把倒置或等长边界当成默认范围。
-  const custom = Number.isFinite(from) && Number.isFinite(to) && to > from;
-  const untilTs = custom
-    ? (from < latestEntry.ts ? Math.min(to, latestEntry.ts) : to)
-    : latestEntry.ts;
-  const sinceTs = custom
-    ? from
-    : latestEntry.ts - (RANGE_SECONDS[range] || RANGE_SECONDS[DEFAULT_RANGE]);
-  const span = Math.max(untilTs - sinceTs, 1);
-
-  // 两端各取上下文：历史可用后续数据识别加热和短暂停顿，但展示不超出区间。
-  const fetchFrom = sinceTs - HISTORY_CONTEXT_SECONDS;
-  const fetchUntil = Math.min(latestEntry.ts, untilTs + HISTORY_CONTEXT_SECONDS);
+  const window = selectWindow(latestEntry.ts, range, from, to);
+  const { custom, untilTs, fetchFrom, fetchUntil } = window;
 
   const latestIsError = Boolean(readCollectionError(latestEntry.raw, latestEntry.ms));
 
@@ -86,16 +93,6 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
     }
   }
 
-  // 阀门状态从最近一次成功厂商响应提取。
-  const valveCode = (() => {
-    const m = /"valveState":(\d+)/.exec(latest.raw || '');
-    return m ? Number(m[1]) : null;
-  })();
-  const valveName = (() => {
-    const m = /"valveStateName":"([^"]*)"/.exec(latest.raw || '');
-    return m ? m[1] : null;
-  })();
-
   let baseLine = parseBaseline(latestStatus?.base_line).baseLine;
   if (!custom && range === '7d' && rows.length >= 20) {
     baseLine = computeOptimalBaseline(rows, baseLine);
@@ -116,6 +113,43 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
     }
   }
 
+  return summarizeSamples({
+    serial, range, window, latest, rows, rawRecent, baseLine, latestOccupied: latestStatus?.occupied,
+  });
+}
+
+export const DEMO_EMPTY_MESSAGE = '所选区间没有演示数据';
+
+export function selectDemoWindow(latestTs, range, from, to) {
+  const custom = Number.isFinite(from) && Number.isFinite(to);
+  const sinceTs = custom ? Math.max(from, latestTs - DEMO_HISTORY_SECONDS)
+    : latestTs - (RANGE_SECONDS[range] || RANGE_SECONDS[DEFAULT_RANGE]);
+  const untilTs = custom ? Math.min(to, latestTs) : latestTs;
+  if (Math.ceil(sinceTs / DEMO_SAMPLE_SECONDS) * DEMO_SAMPLE_SECONDS > untilTs) return null;
+  return { custom, sinceTs, untilTs, fetchFrom: sinceTs - HISTORY_CONTEXT_SECONDS,
+    fetchUntil: Math.min(latestTs, untilTs + HISTORY_CONTEXT_SECONDS) };
+}
+
+export function buildDemoSummary({ range = DEFAULT_RANGE, from, to } = {}) {
+  const latest = getDemoLatest();
+  const window = selectDemoWindow(latest.ts, range, from, to);
+  if (!window) return { error: DEMO_EMPTY_MESSAGE };
+  const rows = getDemoSamples(window.fetchFrom, window.fetchUntil, latest.ts);
+  const rawRecent = getDemoSamples(window.untilTs - 21 * DEMO_SAMPLE_SECONDS, window.untilTs, latest.ts)
+    .slice(-21).reverse();
+  const baseLine = DEFAULT_BASE_LINE;
+  const latestRows = getDemoSamples(latest.ts - RANGE_SECONDS['24h'], latest.ts, latest.ts);
+  const latestOccupied = analyzeHistory(latestRows, baseLine).at(-1)?.occ;
+  const summary = summarizeSamples({
+    serial: latest.serial_no, range, window, latest, rows, rawRecent, baseLine, latestOccupied,
+  });
+  summary.meter.valve = { code: 0, name: '合闸' };
+  return summary;
+}
+
+function summarizeSamples({ serial, range, window, latest, rows, rawRecent, baseLine, latestOccupied }) {
+  const { custom, untilTs, sinceTs } = window;
+  const span = Math.max(untilTs - sinceTs, 1);
   const recs = analyzeHistory(rows, baseLine);
 
   // 曲线功率使用 20 分钟窗口；若相邻采样更稀疏，则直接计算该段平均功率。
@@ -139,7 +173,7 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   const shades = inRange;
   const lastVisible = recs.findLast((r) => r.t <= untilTs);
   const lastState = lastVisible?.occ ?? null;
-  const occupied = latestStatus?.occupied == null ? null : latestStatus.occupied === 1;
+  const occupied = latestOccupied == null ? null : latestOccupied === 1;
   const activeSeconds = inRange.reduce((sum, [a, b]) => sum + b - a, 0);
   const unknownSeconds = unknownShades.reduce((sum, [a, b]) => sum + b - a, 0);
 
@@ -197,6 +231,16 @@ export async function buildSummary(env, { serial, range = DEFAULT_RANGE, from, t
   const sampleInterval = gaps.length ? gaps[Math.floor(gaps.length / 2)] : null;
 
   const parsedBase = parseBaseline(baseLine);
+
+  // 阀门状态从最近一次成功厂商响应提取。
+  const valveCode = (() => {
+    const m = /"valveState":(\d+)/.exec(latest.raw || '');
+    return m ? Number(m[1]) : null;
+  })();
+  const valveName = (() => {
+    const m = /"valveStateName":"([^"]*)"/.exec(latest.raw || '');
+    return m ? m[1] : null;
+  })();
 
   return {
     meter: {
