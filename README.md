@@ -2,6 +2,8 @@
 
 基于 Cloudflare Workers、D1 和 ECharts 的轻量用电监测平台。定时采集电表读数，按住户展示历史用电、余额及状态推测，并通过企业微信群机器人发送业务提醒。
 
+**目录**：[功能](#功能) · [技术与目录](#技术与目录) · [配置项](#配置项) · [获取企业微信 Webhook 地址](#获取企业微信-webhook-地址) · [本地预览与演示账号](#本地预览与演示账号可选) · [部署与更新](#部署与更新) · [添加住户账号](#添加住户账号) · [接口与数据导入](#上游采集接口) · [核心机制与技术细节](#核心机制与技术细节) · [重大更新日志](#重大更新日志)
+
 ## 功能
 
 - 账号与密码登录，JWT Cookie 会话，按账号绑定的电表隔离数据。
@@ -22,6 +24,7 @@
 ├── src/                Worker 入口、路由、采集、统计、鉴权与通知
 ├── public/             看板页面
 ├── db/                 建表、迁移和演示账号 SQL
+├── example.env         本地调试环境变量模板
 ├── wrangler.jsonc      部署配置、数据库绑定和采集计划
 └── README.md
 ```
@@ -36,7 +39,7 @@
 | --- | --- | --- |
 | `METERS` | 普通变量 | 允许采集、上报和历史导入的表号列表 |
 | `SOURCE_URL` | 普通变量 | 定时采集使用的上游设备详情地址 |
-| `RECHARGE_URL` | 普通变量 | 充值页面地址，跳转时自动带上当前电表的 `no` 参数；未配置时隐藏按钮 |
+| `RECHARGE_URL` | 普通变量 | 充值页面地址，跳转时自动带上当前电表的 `no` 参数（兼容 `#/` 哈希路由）；未配置时隐藏按钮 |
 | `JWT_SECRET` | Secret | JWT 会话签名密钥 |
 | `UPLOAD_TOKEN` | Secret | `/api` 上报和历史导入凭证 |
 | `WH_<房间号>` | Secret / 变量 | 对应房间的企业微信群机器人地址（按上游返回的房间名匹配，未配置则不推送） |
@@ -58,68 +61,9 @@
 
 参考：[企业微信官方消息推送配置说明](https://developer.work.weixin.qq.com/document/path/99110) · [腾讯云获取步骤图解](https://cloud.tencent.com/document/product/1759/128391)
 
-## 部署与更新
+## 本地预览与演示账号（可选）
 
-### 更新现有云端项目
-
-当前 Worker 名为 `meter`，配置绑定已有的 `meter` D1 数据库。常规更新代码时保留数据库绑定，无须重新建库、导入本地数据或运行初始化 SQL；若涉及表结构或配置格式变更，按文末“重大更新日志”处理（例如 `npx wrangler d1 execute meter --remote --file db/20261108.sql`）。
-
-安装 Node.js 与 npm 后登录 Cloudflare，再部署：
-
-```sh
-npx wrangler login
-npx wrangler deploy
-```
-
-已有可用登录或 API Token 时按现有鉴权方式使用即可。部署会上传后端与静态页面，并应用配置中的绑定及每两分钟一次的采集计划；数据库中的业务记录由 D1 独立保存。
-
-> `wrangler.jsonc` 当前设置 `workers_dev: false`，访问应以 Cloudflare 控制台中已启用的域名或路由为准，部署返回地址不一定表示 `workers.dev` 入口已开放。
-
-### 首次部署到全新账号或空数据库
-
-先创建新 D1，并把返回的数据库 ID 写入 `wrangler.jsonc`（绑定名保持 `DB`），同时配置好运行时变量、Secret 和可用域名（若全新账号未绑定自定义域名或路由，可在控制台绑定域名，或将 `wrangler.jsonc` 的 `workers_dev` 设为 `true`）：
-
-```sh
-npx wrangler d1 create meter
-# 将返回的 database_id 填入 wrangler.jsonc 后再执行建表：
-npx wrangler d1 execute meter --remote --file db/init.sql
-```
-
-`db/init.sql` 只创建 `users`、`data`、`status` 三张表。随后添加住户账号并执行 `npx wrangler deploy`，后续数据由定时采集或厂商上报写入。登录页默认带有 `demo` 演示提示，若线上保留该提示，可在远程库执行 `npx wrangler d1 execute meter --remote --file db/seed-users.sql` 导入演示账号。
-
-### GitHub 自动部署
-
-把本目录的内容上传为 GitHub 仓库后，在 Cloudflare 控制台选择现有 `meter` Worker，进入 Settings → Build，连接仓库并选择生产分支。使用 Workers Builds 即可，无需额外编写 GitHub Actions。
-
-| 设置 | 值 |
-| --- | --- |
-| 根目录 | 仓库根目录，保留默认值（若上传包含 `code/` 的完整仓库，则设为 `code`） |
-| 构建命令 | 留空 |
-| 部署命令 | `npx wrangler deploy` |
-
-控制台 Worker 名须与 `wrangler.jsonc` 中的 `name` 一致，之后推送生产分支即可触发构建部署。Webhook 地址应在 Worker 的运行时 Variables and Secrets 中设置，不要提交到 GitHub 仓库。
-
-官方说明：[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) · [构建配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) · [Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
-
-## 添加住户账号
-
-管理员在项目目录打开 PowerShell，替换下面的账号、初始密码和表号，再执行命令写入线上 `meter` 数据库（同命令也可用于重置密码或更换绑定表号，对应登录页“忘记密码请联系管理员”）：
-
-```powershell
-npx wrangler d1 execute meter --remote --command @'
-INSERT OR REPLACE INTO users (user, pw, serial_no) VALUES ('住户账号', '初始密码或哈希', '实际表号');
-'@
-```
-
-- `user`：填写唯一的账号名，避免使用空格；英文字母不区分大小写。
-- `pw`：填写临时密码或本系统支持的加盐 PBKDF2 哈希（`pbkdf2-sha256$` 前缀保留给哈希格式）。临时明文密码可能留在终端历史中，首次登录验证成功后会在 D1 中自动替换为随机加盐的哈希。
-- `serial_no`：填写住户实际电表的编号并保留前导零。需要定时采集时，将该表号加入 `METERS`。
-
-字段值中的单引号写成两个单引号。写入成功后，住户即可在登录页使用该账号和密码登录。
-
-测试本地账号时，把命令中的 `--remote` 改为 `--local`；空的本地库先执行 `npx wrangler d1 execute meter --local --file db/init.sql` 建表。
-
-## 可选本地预览
+### 本地试运行
 
 把 `example.env` 复制为同目录下的 `.env`，填入采集地址、表号列表和本地登录用的签名密钥，然后启动：
 
@@ -127,9 +71,9 @@ INSERT OR REPLACE INTO users (user, pw, serial_no) VALUES ('住户账号', '初�
 npx wrangler dev
 ```
 
-本地状态与云端数据分离。测试住户账号时，需要单独初始化本地表、账号与样本；不会自动下载云端数据。
+本地状态与云端数据分离。测试真实住户账号时，需要单独初始化本地表、账号与样本，不会自动下载云端数据。
 
-## 演示账号（可选）
+### 演示账号（`demo`）
 
 默认账号和密码均为 `demo`。本地试运行时先初始化本地库并导入演示账号：
 
@@ -149,6 +93,65 @@ npx wrangler d1 execute meter --local --file db/seed-users.sql
   - 无人保温补热间隔通常约 `8–10 小时`（每次约 `0.25 kWh`），受环境温度影响有小幅漂移；洗澡用水会提前触发并延长加热。
   - 模型先迭代求得稳态初值，再输出 `35 天（5 周）` 连续循环（覆盖最长 30 天查询），家电与电热管功率按实际叠加。
 
+## 部署与更新
+
+### 首次部署到全新账号或空数据库
+
+先创建新 D1，并把返回的数据库 ID 替换写入 `wrangler.jsonc` 中的 `database_id`（绑定名保持 `DB`），同时配置好运行时变量、Secret 和可用域名（`wrangler.jsonc` 默认 `workers_dev: false`；若全新账号未绑定自定义域名或路由，可在控制台绑定域名，或将 `wrangler.jsonc` 的 `workers_dev` 设为 `true`）：
+
+```sh
+npx wrangler d1 create meter
+# 将返回的 database_id 填入 wrangler.jsonc 后再执行建表：
+npx wrangler d1 execute meter --remote --file db/init.sql
+```
+
+`db/init.sql` 只创建 `users`、`data`、`status` 三张表。随后添加住户账号并执行 `npx wrangler deploy`，后续数据由定时采集或厂商上报写入。登录页默认带有 `demo` 演示提示，若线上保留该提示，可在远程库执行 `npx wrangler d1 execute meter --remote --file db/seed-users.sql` 导入演示账号。
+
+### 更新现有云端项目
+
+如果已经部署过名为 `meter` 的 Worker 并绑定了现有 `meter` D1 数据库，常规更新代码时保留数据库绑定即可，无须重新建库、导入本地数据或运行初始化 SQL；若涉及表结构或配置格式变更，按文末“重大更新日志”处理（例如 `npx wrangler d1 execute meter --remote --file db/20261108.sql`）。
+
+安装 Node.js 与 npm 后登录 Cloudflare，再部署：
+
+```sh
+npx wrangler login
+npx wrangler deploy
+```
+
+已有可用登录或 API Token 时按现有鉴权方式使用即可。部署会上传后端与静态页面，并应用配置中的绑定及每两分钟一次的采集计划；数据库中的业务记录由 D1 独立保存。
+
+> `wrangler.jsonc` 当前设置 `workers_dev: false`，访问应以 Cloudflare 控制台中已启用的域名或路由为准，部署返回地址不一定表示 `workers.dev` 入口已开放。
+
+### GitHub 自动部署
+
+把本目录的内容上传为 GitHub 仓库后，在 Cloudflare 控制台选择现有 `meter` Worker，进入 Settings → Build，连接仓库并选择生产分支。使用 Workers Builds 即可，无需额外编写 GitHub Actions。
+
+| 设置 | 值 |
+| --- | --- |
+| 根目录 | 仓库根目录，保留默认值（若上传包含 `code/` 的完整仓库，则设为 `code`） |
+| 构建命令 | 留空 |
+| 部署命令 | `npx wrangler deploy` |
+
+控制台 Worker 名须与 `wrangler.jsonc` 中的 `name` 一致，之后推送生产分支即可触发构建部署。Webhook 地址应在 Worker 的运行时 Variables and Secrets 中设置，不要提交到 GitHub 仓库。
+
+官方说明：[Workers Builds](https://developers.cloudflare.com/workers/ci-cd/builds/) · [构建配置](https://developers.cloudflare.com/workers/ci-cd/builds/configuration/) · [Secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
+
+## 添加住户账号
+
+管理员在项目目录打开终端（PowerShell 或 Bash），替换下面的账号、初始密码和表号，再执行命令写入线上 `meter` 数据库（同命令也可用于重置密码或更换绑定表号，对应登录页“忘记密码请联系管理员”）：
+
+```sh
+npx wrangler d1 execute meter --remote --command "INSERT OR REPLACE INTO users (user, pw, serial_no) VALUES ('住户账号', '初始密码或哈希', '实际表号');"
+```
+
+- `user`：填写唯一的账号名，避免使用空格；英文字母不区分大小写。
+- `pw`：填写临时密码或本系统支持的加盐 PBKDF2 哈希（`pbkdf2-sha256$` 前缀保留给哈希格式）。临时明文密码可能留在终端历史中，首次登录验证成功后会在 D1 中自动替换为随机加盐的哈希。
+- `serial_no`：填写住户实际电表的编号并保留前导零。需要定时采集时，将该表号加入 `METERS`。
+
+字段值中的单引号写成两个单引号（在 PowerShell / Bash 中若密码含 `$` 或双引号，请注意对应 shell 的引号转义，或优先使用单引号哈希后写入）。写入成功后，住户即可在登录页使用该账号和密码登录。
+
+测试本地账号时，把命令中的 `--remote` 改为 `--local`；空的本地库先执行 `npx wrangler d1 execute meter --local --file db/init.sql` 建表。
+
 ## 上游采集接口
 
 Worker 对 `SOURCE_URL` 发起 GET 请求，并通过查询参数 `SerialNo` 传入 `METERS` 中的表号，例如 `GET /device-detail?SerialNo=12345678`。上游应返回 HTTP 200 和如下 JSON（示例数据均为虚构）：
@@ -158,11 +161,13 @@ Worker 对 `SOURCE_URL` 发起 GET 请求，并通过查询参数 `SerialNo` 传
   "success": true,
   "response": {
     "serialNo": "12345678",
-    "houseName": "A101",
     "lastOnlineTime": "2026-11-17 12:00:00",
     "readNumber": 1234.56,
     "residualAmount": 78.9,
-    "valveStateName": "合闸"
+    "valveState": 0,
+    "valveStateName": "合闸",
+    "areaId": 100001,
+    "houseName": "A101"
   }
 }
 ```
@@ -170,7 +175,8 @@ Worker 对 `SOURCE_URL` 发起 GET 请求，并通过查询参数 `SerialNo` 传
 - `serialNo`：表号字符串，应与请求的 `SerialNo` 一致。房间名优先取 `houseName`，为空时取 `userName`。
 - `lastOnlineTime`：东八区的 `YYYY-MM-DD HH:mm:ss` 格式，最多超前当前时间 300 秒。
 - `readNumber`：累计电量（kWh），须为有限非负数字；`residualAmount` 为剩余电费（元），使用 JSON 数字。
-- `valveStateName`：若为 `null`，这条采样会被跳过。
+- `valveState` / `valveStateName`：`valveStateName` 为 `null` 时该条采样会被跳过（JSONL 导入同样跳过）；`valveState`（如 `0` 合闸、`1` 断闸）用于看板顶部阀门状态徽章配色。
+- `areaId`（可选）：存在时用于将 `,"areaId":` 后的不变字段拆出压缩存储。
 
 ## 请求入口
 

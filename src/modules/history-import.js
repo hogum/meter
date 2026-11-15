@@ -1,4 +1,4 @@
-import { extractEnd, extractFront, IMPORTED_JSON_PREFIX, UPSERT_SUCCESSFUL_DATA } from './collect.js';
+import { extractEnd, extractFront, IMPORTED_JSON_PREFIX, pickRoom, UPSERT_SUCCESSFUL_DATA } from './collect.js';
 import { toEpoch } from './collector.js';
 
 export { IMPORTED_JSON_PREFIX } from './collect.js';
@@ -88,10 +88,18 @@ export function prepareHistoryImport(text, serials) {
     while (start > offset && (text[start - 1] === ' ' || text[start - 1] === '\t')) start--;
     try {
       let serial, room, time, kwh, balance, raw, end;
+      let skipRecord = false;
       if (text.startsWith('manual,', content)) {
         const record = readManual(text, content, csvField);
         const [no, name, sampleTime, reading, amount] = record.fields;
-        [serial, room, time, kwh, balance] = [no, name, sampleTime, csvNumber(reading), csvNumber(amount)];
+        [serial, room, time, kwh, balance] = [
+          no,
+          typeof name === 'string' && name.trim() ? name.trim() : null,
+          sampleTime,
+          csvNumber(reading),
+          csvNumber(amount),
+        ];
+        if (kwh == null || kwh < 0) throw new Error('电量须为非负数');
         raw = 'manual';
         end = record.end;
       } else if (text[content] === '{') {
@@ -102,10 +110,18 @@ export function prepareHistoryImport(text, serials) {
         }
         const no = payload.serialNo;
         serial = typeof no === 'string' || Number.isSafeInteger(no) ? String(no) : '';
-        room = payload.houseName || payload.userName || null;
+        room = pickRoom(payload);
         time = payload.lastOnlineTime;
-        kwh = Number.isFinite(payload.readNumber) ? payload.readNumber : null;
-        balance = Number.isFinite(payload.residualAmount) ? payload.residualAmount : null;
+        if (payload.valveStateName === null) {
+          skipRecord = true;
+        } else {
+          if (typeof payload.readNumber !== 'number' || !Number.isFinite(payload.readNumber) || payload.readNumber < 0) {
+            throw new Error('电量读数须为有限非负数');
+          }
+          kwh = payload.readNumber;
+        }
+        balance = typeof payload.residualAmount === 'number' && Number.isFinite(payload.residualAmount)
+          ? payload.residualAmount : null;
         raw = IMPORTED_JSON_PREFIX + record.raw;
         end = record.end;
       } else {
@@ -118,9 +134,13 @@ export function prepareHistoryImport(text, serials) {
       firstContent.lastIndex = offset;
 
       if (!serials.has(serial)) throw new Error('未知电表');
+      if (skipRecord) {
+        duplicates++;
+        continue;
+      }
       const ts = toEpoch(time);
       if (ts === null) throw new Error('采样时间无效');
-      const record = [ts, serial, typeof room === 'string' ? room : null, time, kwh, balance, raw];
+      const record = [ts, serial, room, time, kwh, balance, raw];
       const size = encoder.encode(JSON.stringify(record)).byteLength + 1;
       if (size > MAX_RECORD_BYTES) throw new Error('单条记录过大');
       const key = `${serial}:${ts}`;
@@ -138,7 +158,7 @@ export function prepareHistoryImport(text, serials) {
     }
   }
   if (records.length) flush();
-  if (!batches.length) throw new Error('文件没有采样记录');
+  if (!batches.length && !duplicates) throw new Error('文件没有采样记录');
   return { batches, duplicates };
 }
 

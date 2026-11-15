@@ -117,7 +117,7 @@ export async function runCollect(env, { source = 'cron' } = {}) {
 }
 
 /** 采样房间名优先取 houseName，其次取 userName。 */
-function pickRoom(payload) {
+export function pickRoom(payload) {
   for (const value of [payload.houseName, payload.userName]) {
     if (typeof value === 'string' && value.trim()) return value.trim();
   }

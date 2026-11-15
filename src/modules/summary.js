@@ -234,11 +234,11 @@ function summarizeSamples({ serial, range, window, latest, rows, rawRecent, base
 
   // 阀门状态从最近一次成功厂商响应提取。
   const valveCode = (() => {
-    const m = /"valveState":(\d+)/.exec(latest.raw || '');
+    const m = /"valveState"\s*:\s*(\d+)/.exec(latest.raw || '');
     return m ? Number(m[1]) : null;
   })();
   const valveName = (() => {
-    const m = /"valveStateName":"([^"]*)"/.exec(latest.raw || '');
+    const m = /"valveStateName"\s*:\s*"([^"]*)"/.exec(latest.raw || '');
     return m ? m[1] : null;
   })();
 

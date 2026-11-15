@@ -200,10 +200,11 @@ export async function exportData(request, env) {
     return (r.raw || '') + (tail || '');
   }).join('\n');
 
+  const room = latest.room || rows.findLast((r) => r.room)?.room || serial;
   return new Response(body, {
     headers: {
       'content-type': 'text/plain; charset=utf-8',
-      'content-disposition': `attachment; filename="${encodeURIComponent(latest.room || serial)}_${win ? 'custom' : range}.txt"`,
+      'content-disposition': `attachment; filename="${encodeURIComponent(room)}_${win ? 'custom' : range}.txt"`,
       'cache-control': 'no-store',
     },
   });
