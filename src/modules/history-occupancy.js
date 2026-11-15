@@ -7,13 +7,12 @@ import {
 } from './occupancy.js';
 
 export const HISTORY_CONTEXT_SECONDS = 3600;
-export const TAIL_HOLD_SECONDS = 370;
 
 /** 输入按 ts 升序的完整采样，返回同样数量的点；断档、回退和首点记为 break_before。 */
 export function analyzeHistory(rows, baseLine = DEFAULT_BASE_LINE) {
   const { baseLine: normalizedBase, winSec } = parseBaseline(baseLine);
   const points = [];
-  const initial = { occupied: 0, delta: 0, duration: null, base_line: normalizedBase };
+  const initial = { occupied: 0, delta: 0, duration: winSec, base_line: normalizedBase };
   let state = initial;
   let awaitingConfirmation = true;
   let quietSeconds = 0;
@@ -46,6 +45,7 @@ export function analyzeHistory(rows, baseLine = DEFAULT_BASE_LINE) {
     const next = stepOccupancy(state, { d: delta, gap });
 
     if (next.broken) {
+      // 断档后重置为无人侧初始计时（winSec），避免原有人态的 duration=0 带入回放导致单步提前唤醒。
       state = initial;
       awaitingConfirmation = true;
       quietSeconds = 0;
@@ -53,7 +53,7 @@ export function analyzeHistory(rows, baseLine = DEFAULT_BASE_LINE) {
         t: row.ts,
         k: row.kwh,
         b: row.balance,
-        d: delta != null && delta >= 0 ? delta : null,
+        d: delta >= 0 ? delta : null,
         gap,
         heater_step: hStep,
         break_before: true,
@@ -90,22 +90,6 @@ export function analyzeHistory(rows, baseLine = DEFAULT_BASE_LINE) {
     if (points[i].occ === 1 && points[i - 1].occ !== 1) {
       for (let j = i - 1; j >= 1 && !points[j].break_before && points[j].delta_level === 1 && points[j].occ !== 1; j--) {
         points[j].occ = 1;
-      }
-    } else if (points[i].occ === 0 && points[i - 1].occ === 1) {
-      let lastActive = i - 1;
-      while (
-        lastActive >= 1 &&
-        !points[lastActive].break_before &&
-        points[lastActive].delta_level === 0 &&
-        points[lastActive].occ === 1
-      ) {
-        lastActive--;
-      }
-      const cutoffTs = points[lastActive]?.delta_level > 0
-        ? points[lastActive].t + TAIL_HOLD_SECONDS
-        : 0;
-      for (let j = i - 1; j > lastActive && points[j].t > cutoffTs; j--) {
-        points[j].occ = 0;
       }
     }
   }

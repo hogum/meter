@@ -7,10 +7,18 @@ export const DEMO_HISTORY_SECONDS = 30 * DAY_SECONDS;
 const LOCAL_OFFSET = 8 * 3600;
 // 东八区周一零点（day % 7: 0=周一 .. 4=周五, 5=周六, 6=周日）。
 const EPOCH = Date.parse('2024-01-01T00:00:00+08:00') / 1000;
-const PROFILE_DAYS = 42;
+// 35 = 5 周：覆盖最长 30 天查询的最小整周循环，保持星期对齐。
+const PROFILE_DAYS = 35;
 const STEPS_PER_HOUR = 3600 / DEMO_SAMPLE_SECONDS;
 const STEPS_PER_DAY = DAY_SECONDS / DEMO_SAMPLE_SECONDS;
 const PROFILE_STEPS = PROFILE_DAYS * STEPS_PER_DAY;
+const THERMAL_STEP_SECONDS = 15;
+const THERMAL_STEPS_PER_SAMPLE = DEMO_SAMPLE_SECONDS / THERMAL_STEP_SECONDS;
+const THERMAL_STEPS = PROFILE_STEPS * THERMAL_STEPS_PER_SAMPLE;
+const HEATER_BAND_WH = 250;
+const HEATER_SETPOINT_C = 50;
+const HEATER_TANK_WH_PER_C = 58;
+const HEATER_LOSS_W_PER_C = 1.55;
 
 // 模拟真实租客在低余额（3.6~13.8 元）时的交费习惯，避免固定卡死同一余额与单一递增额。
 const RECHARGE_PLAN = [
@@ -40,11 +48,83 @@ function wrapSlot(slot) {
 }
 
 function addConstantLoad(watts, fromHourAbs, toHourAbs, power) {
-  const start = Math.round(fromHourAbs * STEPS_PER_HOUR);
-  const end = Math.round(toHourAbs * STEPS_PER_HOUR);
-  for (let slot = start; slot < end; slot++) {
-    watts[wrapSlot(slot)] += power;
+  const fromSlot = fromHourAbs * STEPS_PER_HOUR;
+  const toSlot = toHourAbs * STEPS_PER_HOUR;
+  // 开关时刻可以落在采样槽中间，首尾按实际运行时长折算平均功率。
+  // 保留白天保温，也让停机尾步自然出现，而非强行对齐整段 3 分钟。
+  for (let slot = Math.floor(fromSlot); slot < Math.ceil(toSlot); slot++) {
+    const fraction = Math.max(0, Math.min(slot + 1, toSlot) - Math.max(slot, fromSlot));
+    watts[wrapSlot(slot)] += power * fraction;
   }
+}
+
+// 用水造成的等效补热需求（Wh），独立于电热管何时通断。
+function addHotWaterUse(drawWh, fromHourAbs, toHourAbs, energyWh) {
+  const endHour = Math.min(toHourAbs, fromHourAbs + 10 / 60);
+  if (endHour <= fromHourAbs) return;
+  const stepsPerHour = 3600 / THERMAL_STEP_SECONDS;
+  const from = fromHourAbs * stepsPerHour;
+  const to = endHour * stepsPerHour;
+  for (let step = Math.floor(from); step < Math.ceil(to); step++) {
+    const fraction = Math.max(0, Math.min(step + 1, to) - Math.max(step, from));
+    const index = ((step % THERMAL_STEPS) + THERMAL_STEPS) % THERMAL_STEPS;
+    drawWh[index] += energyWh * fraction / (to - from);
+  }
+}
+
+// 简化储水式热水器：冷却累计至约 0.25 kWh 才补热，用水会提前触发。
+// 15 秒积分并处理槽内开关时刻；白天和夜间共用同一份水温状态。
+function addThermostatHeating(watts, drawWh, schedule) {
+  const dt = THERMAL_STEP_SECONDS / 3600;
+  const ambientC = new Float64Array(THERMAL_STEPS);
+  const heaterPower = schedule.map((_, day) => 2050 + 55 * Math.sin(day * 0.53 + 0.8));
+  for (let step = 0; step < THERMAL_STEPS; step++) {
+    const day = Math.floor(step / (86400 / THERMAL_STEP_SECONDS));
+    const hour = (step * THERMAL_STEP_SECONDS % 86400) / 3600;
+    ambientC[step] = schedule[day].ambientC + 1.2 * Math.sin((hour - 9) * Math.PI / 12);
+  }
+  function advance(initial, output) {
+    let { deficitWh, heating } = initial;
+    for (let step = 0; step < THERMAL_STEPS; step++) {
+      const day = Math.floor(step / (86400 / THERMAL_STEP_SECONDS));
+      const power = heaterPower[day];
+      const tankC = HEATER_SETPOINT_C - deficitWh / HEATER_TANK_WH_PER_C;
+      const lossW = HEATER_LOSS_W_PER_C * Math.max(0, tankC - ambientC[step]);
+      const demandW = lossW + drawWh[step] / dt;
+      let onHours = 0;
+      if (heating) {
+        const finishHours = power > demandW ? deficitWh / (power - demandW) : Infinity;
+        if (finishHours <= dt) {
+          onHours = finishHours;
+          deficitWh = demandW * (dt - finishHours);
+          heating = false;
+        } else {
+          onHours = dt;
+          deficitWh += (demandW - power) * dt;
+        }
+      } else if (deficitWh + demandW * dt >= HEATER_BAND_WH) {
+        const waitHours = Math.max(0, (HEATER_BAND_WH - deficitWh) / demandW);
+        onHours = dt - waitHours;
+        deficitWh = HEATER_BAND_WH + (demandW - power) * onHours;
+        heating = true;
+      } else {
+        deficitWh += demandW * dt;
+      }
+      if (output && onHours > 0) {
+        output[Math.floor(step / THERMAL_STEPS_PER_SAMPLE)] += power * onHours * STEPS_PER_HOUR;
+      }
+    }
+    return { deficitWh, heating };
+  }
+  // 求重复日程的稳定初态，35 天循环边界不重置水温。
+  let state = { deficitWh: HEATER_BAND_WH / 2, heating: false };
+  for (let cycle = 0; cycle < 8; cycle++) {
+    const next = advance(state);
+    const converged = next.heating === state.heating && Math.abs(next.deficitWh - state.deficitWh) < 1e-7;
+    state = next;
+    if (converged) break;
+  }
+  advance(state, watts);
 }
 
 function addAcCooling(watts, fromHourAbs, toHourAbs, peakW, steadyW, tauHours, phase) {
@@ -71,7 +151,7 @@ function addAwakeActivity(watts, fromHourAbs, toHourAbs, random, baseMin = 115, 
   }
 }
 
-// 参照 D703 空调季特征生成跨天连续、且区分工作日/周末不同节奏的 42 天负载曲线。
+// 低待机暖季房间：固定 12w/15m，空调及热水器共用同一环境温度日程。
 function buildLoadProfile() {
   let seed = 73041;
   const random = () => {
@@ -82,7 +162,8 @@ function buildLoadProfile() {
   const schedule = [];
   for (let day = 0; day < PROFILE_DAYS; day++) {
     const dow = day % 7;
-    const weather = 0.84 + 0.24 * Math.sin((day / 6.2) + 0.7) + (random() - 0.5) * 0.14;
+    const ambientC = 29 + 1.5 * Math.sin((day / 6.2) + 0.7) + (random() - 0.5) * 0.8;
+    const weather = 1 + (ambientC - 29) * 0.065;
 
     if (dow < 5) {
       // 工作日：多数为早出晚归，偶发午休回家、晚归加班/聚餐或居家半天，避免千篇一律。
@@ -99,7 +180,7 @@ function buildLoadProfile() {
           ? 20.15 + random() * 1.75
           : 16.45 + random() * 1.25;
       const bedtime = (dow === 4 ? 24.1 : 23.3) + random() * 1.35;
-      schedule.push({ dow, wake, leave, middayReturn, returnHome, bedtime, weather, morningAc: lateMorning });
+      schedule.push({ dow, wake, leave, middayReturn, returnHome, bedtime, ambientC, weather, morningAc: lateMorning });
     } else if (dow === 5) {
       // 周六：晚起，上午/午间居家开空调或厨电，下午至晚间外出聚会，深夜归来。
       const wake = 9.1 + random() * 1.35;
@@ -107,7 +188,7 @@ function buildLoadProfile() {
       const leave = afternoonOut ? 12.7 + random() * 2.1 : 10.8 + random() * 1.1;
       const returnHome = afternoonOut ? 20.6 + random() * 2.1 : 17.5 + random() * 1.9;
       const bedtime = 24.15 + random() * 1.4;
-      schedule.push({ dow, wake, leave, middayReturn: null, returnHome, bedtime, weather, morningAc: true });
+      schedule.push({ dow, wake, leave, middayReturn: null, returnHome, bedtime, ambientC, weather, morningAc: true });
     } else {
       // 周日：晚起，约半数全天居家午休空调+傍晚散步，半数白天外出傍晚回家早睡准备周一。
       const wake = 8.9 + random() * 1.35;
@@ -115,14 +196,15 @@ function buildLoadProfile() {
       const leave = lazySunday ? 17.2 + random() * 1.4 : 11.5 + random() * 1.8;
       const returnHome = lazySunday ? leave + 2.3 + random() * 1.6 : 17.3 + random() * 1.8;
       const bedtime = 23.15 + random() * 1.1;
-      schedule.push({ dow, wake, leave, middayReturn: null, returnHome, bedtime, weather, morningAc: true });
+      schedule.push({ dow, wake, leave, middayReturn: null, returnHome, bedtime, ambientC, weather, morningAc: true });
     }
   }
 
   const watts = new Float64Array(PROFILE_STEPS);
-  // 底层待机（路由器/网关/待机插座）：9~14 W 极轻微波动，外出时图面干净清爽。
+  const hotWaterDrawWh = new Float64Array(THERMAL_STEPS);
+  // 路由器/网关等低待机房间，约 7.8–10.2 W，低于固定的 12 W 基线。
   for (let slot = 0; slot < PROFILE_STEPS; slot++) {
-    watts[slot] = 9 + Math.sin(slot * 0.17) * 1.8 + random() * 3.5;
+    watts[slot] = 9 + Math.sin(slot * 0.17) * 0.6 + (random() - 0.5) * 1.2;
   }
 
   for (let day = 0; day < PROFILE_DAYS; day++) {
@@ -155,14 +237,8 @@ function buildLoadProfile() {
       const span = Math.max(0.5, bedAbs - returnAbs - 0.65);
       const bathStart = returnAbs + 0.25 + random() * span;
       const bathDur = (6 + Math.floor(random() * 5)) / STEPS_PER_HOUR;
-      addConstantLoad(watts, bathStart, Math.min(bedAbs - 0.1, bathStart + bathDur), 1950 + random() * 260);
-    }
-
-    // 凌晨偶发一次储水式热水器 3~6 分钟自动保温脉冲。
-    if (random() < 0.35) {
-      const pulseH = dayBase + 24 + 1.4 + random() * 4.0;
-      const pulseSlots = random() < 0.5 ? 1 : 2;
-      addConstantLoad(watts, pulseH, pulseH + pulseSlots / STEPS_PER_HOUR, 2050 + random() * 260);
+      const bathEnd = Math.min(bedAbs - 0.1, bathStart + bathDur);
+      addHotWaterUse(hotWaterDrawWh, bathStart, bathEnd, (1950 + random() * 260) * (bathEnd - bathStart));
     }
 
     // 2. 次日起床至出门：区分工作日急促洗漱与周末/居家上午空调+厨电。
@@ -181,7 +257,8 @@ function buildLoadProfile() {
     if (showerInMorning) {
       const bathStart = wakeAbs + 0.12 + random() * Math.max(0.1, leaveAbs - wakeAbs - 0.5);
       const bathDur = (5 + Math.floor(random() * 4)) / STEPS_PER_HOUR;
-      addConstantLoad(watts, bathStart, Math.min(leaveAbs - 0.05, bathStart + bathDur), 1950 + random() * 250);
+      const bathEnd = Math.min(leaveAbs - 0.05, bathStart + bathDur);
+      addHotWaterUse(hotWaterDrawWh, bathStart, bathEnd, (1950 + random() * 250) * (bathEnd - bathStart));
     } else if (random() < 0.5) {
       const rushStart = wakeAbs + 0.1 + random() * Math.max(0.1, leaveAbs - wakeAbs - 0.25);
       const rushSlots = random() < 0.65 ? 1 : 2;
@@ -203,20 +280,14 @@ function buildLoadProfile() {
       }
     }
 
-    // 4. 白天外出静默段：偶发 1 次 3~6 分钟热水器保温脉冲，展现系统过滤误报的能力。
-    const awayStart = dayBase + (today.middayReturn ? today.middayReturn.to : today.leave);
-    const awayEnd = returnAbs;
-    if (awayEnd - awayStart > 2.8 && random() < 0.65) {
-      const keepStart = awayStart + 1.0 + random() * (awayEnd - awayStart - 1.6);
-      const keepSlots = random() < 0.45 ? 1 : 2;
-      addConstantLoad(watts, keepStart, keepStart + keepSlots / STEPS_PER_HOUR, 2050 + random() * 250);
-    }
   }
 
-  // 控制单槽上限在 2800 W 内，使 20 分钟平滑峰值保持在 3000 W 档（与 D703 纵轴刻度一致）。
+  addThermostatHeating(watts, hotWaterDrawWh, schedule);
+
+  // 空调、厨电与热水器正常叠加，不再截断总功率而丢失加热能量。
   const cumulative = new Uint32Array(PROFILE_STEPS + 1);
   for (let slot = 0; slot < PROFILE_STEPS; slot++) {
-    cumulative[slot + 1] = cumulative[slot] + Math.min(Math.round(watts[slot]), 2800);
+    cumulative[slot + 1] = cumulative[slot] + Math.round(watts[slot]);
   }
   return cumulative;
 }
