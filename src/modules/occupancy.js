@@ -35,11 +35,22 @@ export function heaterStep(gap) {
   return Number((HEATER_BASE_STEP * Math.max(gap ?? BASE_SECONDS, BASE_SECONDS) / BASE_SECONDS).toFixed(2));
 }
 
+const PHASE_QUIET = 0;
+const PHASE_BASELINE = 1;
+const PHASE_HEATER_OBSERVE = 2;
+const PHASE_ACTIVE_HOLD = 3;
+const PHASE_ACTIVE = 4;
+const PHASE_HEATER_EDGE = 5;
+const PHASE_HEATER_MAIN = 6;
+const PHASE_HEATER_TAIL = 7;
+
 /**
- * 单步状态机，delta 只保存等级 0–7，duration 只保存当前阶段的秒数。
- * 0–5 沿用原等级，6 = 疑似加热前沿，7 = 加热后观察。
- * 有人时累计静默；无人时按等级分别累计跳字等待、活动确认或连续加热。
- * mode 对外合并为 0 = 静默/基线内，1 = 活动，2 = 加热。
+ * 单步状态机，delta 只保存阶段等级 0–7，duration 只保存当前阶段的秒数。
+ * 按 mode 分段编号：
+ * - mode 0（静默/基线）：0 = 静默，1 = 基线内正增量，2 = 加热后观察
+ * - mode 1（活动）：3 = 确认期短静默，4 = 活动
+ * - mode 2（加热）：5 = 疑似加热前沿，6 = 加热主步，7 = 加热尾步
+ * 有人时累计静默；无人时按阶段分别累计跳字等待、活动确认或连续加热。
  */
 export function stepOccupancy(previous, step = {}) {
   return stepWithBaseline(previous, step, parseBaseline(previous?.base_line));
@@ -47,51 +58,51 @@ export function stepOccupancy(previous, step = {}) {
 
 function stepWithBaseline(previous, { d, gap }, { baseW, winSec, maxTickSpan, baseLine }) {
   const occupied = previous?.occupied === 1 ? 1 : 0;
-  const validPhase = Number.isInteger(previous?.delta) && previous.delta >= 0 && previous.delta <= 7;
-  const level = validPhase ? previous.delta : 0;
+  const validPhase = Number.isInteger(previous?.delta)
+    && previous.delta >= PHASE_QUIET && previous.delta <= PHASE_HEATER_TAIL;
+  const level = validPhase ? previous.delta : PHASE_QUIET;
   const timer = validPhase && Number.isFinite(previous?.duration) && previous.duration >= 0
     ? Math.round(previous.duration) : 0;
   const highBase = baseW > 40;
-  const warming = !occupied && (level === 1 || level === 5);
+  const warming = !occupied && (level === PHASE_ACTIVE || level === PHASE_ACTIVE_HOLD);
   const result = (occ, delta, duration, effW, broken = false) => ({
     occupied: occ, delta, duration: Math.round(duration),
-    mode: delta === 2 || delta === 3 || delta === 6 ? 2 : delta === 1 || delta === 5 ? 1 : 0,
+    mode: delta >= PHASE_HEATER_EDGE ? 2 : delta >= PHASE_ACTIVE_HOLD ? 1 : 0,
     base_line: baseLine, effW: effW == null ? null : Math.round(effW), broken,
   });
   if (!Number.isFinite(gap) || gap <= 0 || gap > MAX_QUIET_GAP_SECONDS || !Number.isFinite(d) || d < 0) {
-    return result(occupied, 0, occupied ? 0 : winSec, null, true);
+    return result(occupied, PHASE_QUIET, occupied ? 0 : winSec, null, true);
   }
   const avgW = d * 3600000 / gap;
   const moderateGap = gap > MAX_GAP_SECONDS && avgW <= baseW;
   if (gap > MAX_GAP_SECONDS && !moderateGap) {
-    return result(occupied, 0, occupied ? 0 : winSec, null, true);
+    return result(occupied, PHASE_QUIET, occupied ? 0 : winSec, null, true);
   }
 
   if (!occupied && !moderateGap) {
-    // 6: 疑似加热前沿；7: 加热后观察。均为独立等级，duration 仍是秒数。
-    if (level === 6) {
+    if (level === PHASE_HEATER_EDGE) {
       if (avgW >= HEATER_EDGE_WATTS) {
         const heating = timer + gap;
         const confirmed = heating >= HEATER_CONFIRM_SECONDS;
-        const nextLevel = d >= heaterStep(gap) ? 2 : 6;
+        const nextLevel = d >= heaterStep(gap) ? PHASE_HEATER_MAIN : PHASE_HEATER_EDGE;
         return result(confirmed ? 1 : 0, nextLevel, confirmed ? 0 : heating, avgW);
       }
       // 前沿后的下降步仍可能是同一次加热的尾沿，不把加热时长当作活动确认。
-      return d > 0 ? result(0, 3, Math.max(timer, winSec), avgW)
-        : result(0, gap < HEATER_OBSERVE_SECONDS ? 7 : 0, gap, 0);
+      return d > 0 ? result(0, PHASE_HEATER_TAIL, Math.max(timer, winSec), avgW)
+        : result(0, gap < HEATER_OBSERVE_SECONDS ? PHASE_HEATER_OBSERVE : PHASE_QUIET, gap, 0);
     }
-    if ((level === 2 || level === 3 || level === 7) && d === 0) {
-      const age = level === 7 ? timer + gap : gap;
-      return result(0, age < HEATER_OBSERVE_SECONDS ? 7 : 0, Math.min(86400, age), 0);
+    if ((level === PHASE_HEATER_MAIN || level === PHASE_HEATER_TAIL || level === PHASE_HEATER_OBSERVE) && d === 0) {
+      const age = level === PHASE_HEATER_OBSERVE ? timer + gap : gap;
+      return result(0, age < HEATER_OBSERVE_SECONDS ? PHASE_HEATER_OBSERVE : PHASE_QUIET, Math.min(86400, age), 0);
     }
     // 常规低底噪采样保护刚跳字后的脉冲；活动待确认后的高功率步
     // 也先按加热前沿观察，覆盖稀疏采样拆开的保温脉冲，不继承活动计时。
     const regularGap = gap <= BASE_SECONDS * 1.5;
-    const idleEdge = level === 0 && ((!highBase && regularGap) || timer >= HEATER_EDGE_QUIET_SECONDS);
-    const pendingEdge = level === 1 || level === 5;
+    const idleEdge = level === PHASE_QUIET && ((!highBase && regularGap) || timer >= HEATER_EDGE_QUIET_SECONDS);
+    const pendingEdge = level === PHASE_ACTIVE || level === PHASE_ACTIVE_HOLD;
     if ((idleEdge || pendingEdge)
         && avgW >= HEATER_EDGE_WATTS && d < heaterStep(gap)) {
-      return result(0, 6, Math.min(gap, BASE_SECONDS), avgW);
+      return result(0, PHASE_HEATER_EDGE, Math.min(gap, BASE_SECONDS), avgW);
     }
   }
 
@@ -99,48 +110,48 @@ function stepWithBaseline(previous, { d, gap }, { baseW, winSec, maxTickSpan, ba
   const quiet = occupied ? timer : 0;
   if (!moderateGap && d > 0 && d >= heaterStep(gap)) {
     if (!occupied) {
-      const heating = level === 2 ? timer + gap : Math.min(gap, BASE_SECONDS);
+      const heating = level === PHASE_HEATER_MAIN ? timer + gap : Math.min(gap, BASE_SECONDS);
       const confirmed = heating >= HEATER_CONFIRM_SECONDS;
-      return result(confirmed ? 1 : 0, 2, confirmed ? 0 : heating, avgW);
+      return result(confirmed ? 1 : 0, PHASE_HEATER_MAIN, confirmed ? 0 : heating, avgW);
     }
-    return result(1, 2, level === 2 ? quiet : Math.max(0, quiet - BASE_SECONDS * 2), avgW);
+    return result(1, PHASE_HEATER_MAIN, level === PHASE_HEATER_MAIN ? quiet : Math.max(0, quiet - BASE_SECONDS * 2), avgW);
   }
-  if (!moderateGap && d > 0 && level === 2) {
-    return result(occupied, 3, occupied ? quiet : Math.max(timer, winSec), avgW);
+  if (!moderateGap && d > 0 && level === PHASE_HEATER_MAIN) {
+    return result(occupied, PHASE_HEATER_TAIL, occupied ? quiet : Math.max(timer, winSec), avgW);
   }
 
   // 用当前阶段计时近似跳字跨度，不额外保存独立计数器。
   let age = 0;
-  if (level === 0 || level === 7) age = timer;
-  else if (level === 5) age = highBase ? BASE_SECONDS : Math.max(BASE_SECONDS, timer - BASE_SECONDS);
-  else if (level === 2 || level === 3) age = occupied ? quiet : timer;
+  if (level === PHASE_QUIET || level === PHASE_HEATER_OBSERVE) age = timer;
+  else if (level === PHASE_ACTIVE_HOLD) age = highBase ? BASE_SECONDS : Math.max(BASE_SECONDS, timer - BASE_SECONDS);
+  else if (level === PHASE_HEATER_MAIN || level === PHASE_HEATER_TAIL) age = occupied ? quiet : timer;
   // 尾步后又有至少两格普通增量，按新活动计时；不携带加热时长，
   // 也不让尾步保存的保守等待时间稀释新的活动证据。
-  const afterTailActivity = !occupied && level === 3 && d >= 0.02;
-  const span = level === 1 || level === 4 || afterTailActivity ? gap : (age || BASE_SECONDS) + gap;
+  const afterTailActivity = !occupied && level === PHASE_HEATER_TAIL && d >= 0.02;
+  const span = level === PHASE_ACTIVE || level === PHASE_BASELINE || afterTailActivity ? gap : (age || BASE_SECONDS) + gap;
   const effW = moderateGap ? avgW : d * 3600000 / span;
   const wakeW = highBase ? baseW : Math.max(baseW * 1.4, 20);
   if (d > 0 && effW > baseW) {
-    if (occupied) return result(1, 1, 0, effW);
+    if (occupied) return result(1, PHASE_ACTIVE, 0, effW);
     if (effW > wakeW) {
-      const instant = !highBase && d === 0.01 && level !== 4 && level !== 3 && level !== 7
+      const instant = !highBase && d === 0.01 && level !== PHASE_BASELINE && level !== PHASE_HEATER_TAIL && level !== PHASE_HEATER_OBSERVE
         && span <= FAST_WAKE_SPAN_SECONDS && span < maxTickSpan;
       const active = warming ? timer + gap : Math.min(gap, BASE_SECONDS);
-      if (instant || active >= (highBase ? HIGH_BASE_CONFIRM_SECONDS : ACTIVE_CONFIRM_SECONDS)) return result(1, 1, 0, effW);
-      return result(0, 1, active, effW);
+      if (instant || active >= (highBase ? HIGH_BASE_CONFIRM_SECONDS : ACTIVE_CONFIRM_SECONDS)) return result(1, PHASE_ACTIVE, 0, effW);
+      return result(0, PHASE_ACTIVE, active, effW);
     }
   }
   const maxWarmSpan = highBase ? 36000 / baseW : 36000 / wakeW;
   // 高基线要求连续活动采样，零增量结束确认，避免缺少独立计时器而无限保留。
   if (warming && !highBase && !moderateGap && d === 0 && age + gap < maxWarmSpan) {
-    return result(0, 5, timer + gap, 0);
+    return result(0, PHASE_ACTIVE_HOLD, timer + gap, 0);
   }
   if (occupied) {
     const nextQuiet = quiet + gap;
-    return nextQuiet < winSec ? result(1, d > 0 ? 4 : 0, nextQuiet, effW)
-      : result(0, d > 0 ? 4 : 0, d > 0 ? 0 : age + gap, effW);
+    return nextQuiet < winSec ? result(1, d > 0 ? PHASE_BASELINE : PHASE_QUIET, nextQuiet, effW)
+      : result(0, d > 0 ? PHASE_BASELINE : PHASE_QUIET, d > 0 ? 0 : age + gap, effW);
   }
-  return result(0, d > 0 ? 4 : 0, d > 0 ? 0 : Math.min(86400, age + gap), effW);
+  return result(0, d > 0 ? PHASE_BASELINE : PHASE_QUIET, d > 0 ? 0 : Math.min(86400, age + gap), effW);
 }
 
 /**
@@ -218,7 +229,7 @@ export function computeOptimalBaseline(rows, currentBaseLine = DEFAULT_BASE_LINE
       const candidate = `${baseW}w/${winMin}m`;
       const baseline = parseBaseline(candidate);
 
-      const initial = { occupied: 0, delta: 0, duration: baseline.winSec, base_line: candidate };
+      const initial = { occupied: 0, delta: PHASE_QUIET, duration: baseline.winSec, base_line: candidate };
       let state = initial;
       let runSeconds = 0;
       let runStartedWithFlip = false;
