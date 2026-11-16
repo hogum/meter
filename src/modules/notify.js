@@ -83,7 +83,7 @@ export async function checkNotifications(env, serial, room, events) {
   for (const content of events) {
     const started = Date.now();
     const delivered = await sendWxHook(env, content, url);
-    console.log(JSON.stringify({ room, event: content.slice(1, content.indexOf('】')),
+    console.log('notify', JSON.stringify({ room, event: content.slice(1, content.indexOf('】')),
       delivered, duration_ms: Date.now() - started }));
     if (!delivered) pushed = false;
   }

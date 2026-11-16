@@ -91,7 +91,7 @@ export async function runCollect(env, { source = 'cron' } = {}) {
       submitting = new Promise(resolve => setTimeout(resolve, 0)).then(() => {
         const ready = pending;
         pending = [];
-        return persistCollections(env, ready, batch);
+        return persistCollections(env, ready, { ...batch, logUsage: false });
       });
     }
     pending.push(reading);
@@ -112,6 +112,16 @@ export async function runCollect(env, { source = 'cron' } = {}) {
   if (combined.insert_error) combined.duplicated = 0;
   const detail = new Map(reports.flatMap(report => report.detail).map(item => [item.serial, item]));
   combined.detail = serials.map(serial => detail.get(serial));
+  const d1Usage = {};
+  for (const report of reports) {
+    for (const [group, counts] of Object.entries(report.d1_usage || {})) {
+      const totals = d1Usage[group] ??= { rows_read: 0, rows_written: 0 };
+      totals.rows_read += counts.rows_read;
+      totals.rows_written += counts.rows_written;
+    }
+  }
+  combined.d1_usage = d1Usage;
+  combined.batches = reports.length;
   combined.duration_ms = Date.now() - startedAt;
   return combined;
 }
@@ -233,7 +243,8 @@ async function retryCollection(env, reading, record) {
 
 /** 定时采集与手动上报共用事务、去重和通知处理。 */
 export async function persistCollections(env, results, {
-  startedAt = Date.now(), batchId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`, source = 'upload',
+  startedAt = Date.now(), batchId = `${startedAt}-${Math.random().toString(36).slice(2, 8)}`,
+  source = 'upload', logUsage = true,
 } = {}) {
   const okOnes = results.filter((r) => r.ok && r.payload.valveStateName !== null);
   const failed = results.filter((r) => !r.ok);
@@ -306,7 +317,10 @@ export async function persistCollections(env, results, {
     insertError = e.message;
   }
 
-  console.log(JSON.stringify({ batch_id: batchId, source, d1_usage: usage }));
+  // 定时采集由 runCollect 汇总后随 collect 日志一并输出，仅其他调用方在此单独记录。
+  if (logUsage) {
+    console.log('d1_usage', JSON.stringify({ batch_id: batchId, source, d1_usage: usage }));
+  }
 
   // 通知失败不回滚已提交的采样和状态。
   const notifications = await Promise.allSettled(
@@ -328,6 +342,7 @@ export async function persistCollections(env, results, {
     failed_inserted: failedInserted,
     end_changed: endChanged,
     insert_error: insertError,
+    d1_usage: usage,
     duration_ms: Date.now() - startedAt,
     detail: results.map((r) => ({
       serial: r.serial,

@@ -41,6 +41,7 @@ export default {
       const r = await runCollect(env, { source: 'cron' });
       console.log('collect', JSON.stringify({
         batch: r.batch_id,
+        batches: r.batches,
         ok: r.meters_ok,
         fail: r.meters_fail,
         inserted: r.inserted,
@@ -48,6 +49,7 @@ export default {
         duplicated: r.duplicated,
         insert_error: r.insert_error,
         failures: r.detail.filter((item) => !item.ok).map(({ serial, error }) => ({ serial, error })),
+        d1_usage: r.d1_usage,
         ms: r.duration_ms,
         cron: event?.cron,
       }));
